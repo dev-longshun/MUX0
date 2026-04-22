@@ -1,0 +1,133 @@
+# NOTE: ghostty builds a static library (.a) on macOS, not a dylib.
+# Run scripts/build-vendor.sh once to populate Vendor/ghostty/lib/
+# before opening the Xcode project. The .a file is gitignored.
+name: mux0
+options:
+  bundleIdPrefix: com.mux0
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "15"
+
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.6.0"
+
+targets:
+  mux0:
+    type: application
+    platform: macOS
+    sources:
+      - path: mux0
+        excludes:
+          - "**/*.md"
+    info:
+      path: mux0/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleName: MUX0
+        CFBundleDisplayName: MUX0
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundlePackageType: APPL
+        NSPrincipalClass: NSApplication
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        SUFeedURL: https://github.com/10xChengTu/mux0/releases/latest/download/appcast.xml
+        SUPublicEDKey: +u/yKnlOyk6VnbdXzn5dVaHMoCzambPTRX0dQNe6PRU=
+        SUEnableAutomaticChecks: YES
+        SUScheduledCheckInterval: 86400
+        ITSAppUsesNonExemptEncryption: NO
+    postBuildScripts:
+      - name: Copy ghostty resources
+        script: |
+          set -e
+          SRC="${PROJECT_DIR}/Vendor/ghostty/share/ghostty"
+          DST="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/ghostty"
+          if [ -d "$SRC" ]; then
+            mkdir -p "$DST"
+            rm -rf "$DST"
+            cp -R "$SRC" "$DST"
+          fi
+        basedOnDependencyAnalysis: false
+      - name: Copy mux0 agent hooks
+        script: |
+          rm -rf "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/agent-hooks"
+          mkdir -p "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/agent-hooks"
+          cp -R "$SRCROOT/Resources/agent-hooks/" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/agent-hooks/"
+          chmod +x "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/agent-hooks/"*.sh 2>/dev/null || true
+
+          # --- auto-activate mux0 status hooks by appending to ghostty's shell-integration scripts ---
+
+          _mux0_append_once() {
+              # $1: target file  $2: marker  $3: line to append
+              local f="$1" marker="$2" line="$3"
+              [ -f "$f" ] || return 0
+              grep -q "$marker" "$f" 2>/dev/null && return 0
+              {
+                  echo ""
+                  echo "# mux0: auto-load agent status hooks"
+                  echo "$line"
+              } >> "$f"
+          }
+
+          GHOSTTY_DIR="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/ghostty/shell-integration"
+
+          # zsh — find which file ghostty ships (different ghostty versions name it differently)
+          for candidate in "$GHOSTTY_DIR/zsh/.zshrc" \
+                           "$GHOSTTY_DIR/zsh/ghostty-integration" \
+                           "$GHOSTTY_DIR/zsh/.zshenv"; do
+              _mux0_append_once "$candidate" "MUX0_AGENT_HOOKS_DIR" \
+                  '[ -f "$MUX0_AGENT_HOOKS_DIR/bootstrap.zsh" ] && source "$MUX0_AGENT_HOOKS_DIR/bootstrap.zsh"'
+          done
+
+          # bash — ghostty typically uses bash-integration / ghostty.bash or an rc-file
+          for candidate in "$GHOSTTY_DIR/bash/bash-preexec.sh" \
+                           "$GHOSTTY_DIR/bash/ghostty.bash" \
+                           "$GHOSTTY_DIR/bash/ghostty-bash-integration.bash"; do
+              _mux0_append_once "$candidate" "MUX0_AGENT_HOOKS_DIR" \
+                  '[ -f "$MUX0_AGENT_HOOKS_DIR/bootstrap.bash" ] && source "$MUX0_AGENT_HOOKS_DIR/bootstrap.bash"'
+          done
+
+          # fish — ghostty drops an auto-loaded conf.d file
+          for candidate in "$GHOSTTY_DIR/fish/vendor_conf.d/ghostty-shell-integration.fish" \
+                           "$GHOSTTY_DIR/fish/conf.d/ghostty-shell-integration.fish"; do
+              _mux0_append_once "$candidate" "MUX0_AGENT_HOOKS_DIR" \
+                  'test -f "$MUX0_AGENT_HOOKS_DIR/bootstrap.fish"; and source "$MUX0_AGENT_HOOKS_DIR/bootstrap.fish"'
+          done
+        basedOnDependencyAnalysis: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mux0.app
+        SWIFT_OBJC_BRIDGING_HEADER: mux0/Ghostty/ghostty-bridging-header.h
+        LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/Vendor/ghostty/lib
+        HEADER_SEARCH_PATHS: $(PROJECT_DIR)/Vendor/ghostty/include
+        OTHER_LDFLAGS: -lghostty -lc++ -framework Carbon
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        LD_RUNPATH_SEARCH_PATHS: '@executable_path/../Frameworks'
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: mux0/mux0.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "3"
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: AppKit.framework
+      - package: Sparkle
+        product: Sparkle
+
+  mux0Tests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - mux0Tests
+    settings:
+      base:
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        GENERATE_INFOPLIST_FILE: YES
+        # 测试目标链接 mux0 模块时会重新扫描 bridging header，
+        # 因此同样需要能解析到 <ghostty.h>。
+        HEADER_SEARCH_PATHS: $(PROJECT_DIR)/Vendor/ghostty/include
+    dependencies:
+      - target: mux0
