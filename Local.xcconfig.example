@@ -1,0 +1,14 @@
+// Copy to Local.xcconfig (gitignored) to customize your local Debug build.
+//
+//   cp Local.xcconfig.example Local.xcconfig
+//
+// Setting DEVELOPMENT_TEAM makes the Debug build get signed with your Apple
+// Development cert (Automatic signing) instead of the default ad-hoc signature.
+// Benefit: macOS TCC (Files & Folders, Full Disk Access, etc.) identifies your
+// build by its stable designated requirement, so granted permissions survive
+// rebuilds — no more "allow mux0 to access Documents" popups every `xcodebuild`.
+//
+// Where to find your Team ID: Xcode → Settings → Accounts → pick your Apple ID
+// → Team column (10-char alphanumeric).
+//
+// DEVELOPMENT_TEAM = XXXXXXXXXX

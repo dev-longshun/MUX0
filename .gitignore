@@ -10,6 +10,9 @@ build/
 *.xcuserdata
 DerivedData/
 
+# Local signing override (opt-in, see Local.xcconfig.example)
+Local.xcconfig
+
 # Large binary vendor files (build from source with: zig build)
 Vendor/ghostty/lib/
 Vendor/ghostty/GhosttyKit.xcframework/

@@ -122,10 +122,42 @@ This is macOS's Gatekeeper warning. Go to **System Settings → Privacy & Securi
 
 Auto-update runs at most once a day. To force a check, open **Settings → Update** and click **Check for Updates**.
 
+## Building from Source
+
+```bash
+./scripts/build-vendor.sh   # build libghostty (once)
+xcodegen generate
+xcodebuild -project mux0.xcodeproj -scheme mux0 -configuration Debug build
+```
+
+See [`docs/build.md`](docs/build.md) for the full prerequisites, vendor layout, and release workflow.
+
+### Persist local permissions across rebuilds (optional)
+
+By default, Debug builds are **ad-hoc signed** — every `xcodebuild` produces a new `cdhash`, which macOS TCC treats as a different app and revokes any Files & Folders / Full Disk Access permissions you previously granted. The popups come back after every rebuild.
+
+To fix this, sign Debug builds with a stable Apple Development cert:
+
+1. Make sure your Apple ID is signed into **Xcode → Settings → Accounts**.
+2. Copy the template and fill in your 10-char Team ID:
+   ```bash
+   cp Local.xcconfig.example Local.xcconfig
+   # then edit Local.xcconfig:
+   # DEVELOPMENT_TEAM = XXXXXXXXXX
+   ```
+3. `xcodegen generate && xcodebuild ... build` — verify with:
+   ```bash
+   codesign -dv ~/Library/Developer/Xcode/DerivedData/mux0-*/Build/Products/Debug/mux0.app 2>&1 | grep Authority
+   ```
+   You should see `Authority=Apple Development: <Your Name> (...)` instead of `adhoc`.
+
+`Local.xcconfig` is gitignored. Skipping this step is fine — the build still works, you just keep the ad-hoc popup loop.
+
 ## Documentation
 
 - [Settings reference](docs/settings-reference.md) — every setting explained
 - [Agent hooks reference](docs/agent-hooks.md) — how status icons are wired up
+- [Build & vendor](docs/build.md) — libghostty, signing, release pipeline
 - [Internationalization](docs/i18n.md) — supported languages and behavior
 
 ## License
