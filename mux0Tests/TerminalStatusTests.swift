@@ -211,6 +211,64 @@ final class TerminalStatusTests: XCTestCase {
                                         agent: .claude, summary: nil, readAt: readAt)
         XCTAssertNotEqual(a, b)
     }
+
+    // MARK: - aggregate unread tie-break
+
+    func testAggregateUnreadSuccessBeatsReadSuccess() {
+        let now = Date()
+        let readAt = Date(timeIntervalSince1970: 99)
+        let read   = TerminalStatus.success(exitCode: 0, duration: 1, finishedAt: now,
+                                             agent: .claude, summary: nil, readAt: readAt)
+        let unread = TerminalStatus.success(exitCode: 0, duration: 2, finishedAt: now,
+                                             agent: .claude)
+        let agg1 = TerminalStatus.aggregate([read, unread])
+        let agg2 = TerminalStatus.aggregate([unread, read])
+        // order-independent: unread wins regardless of position
+        guard case .success(_, _, _, _, _, let r1) = agg1,
+              case .success(_, _, _, _, _, let r2) = agg2 else {
+            XCTFail("Expected .success from both aggregations"); return
+        }
+        XCTAssertNil(r1)
+        XCTAssertNil(r2)
+    }
+
+    func testAggregateUnreadFailedBeatsReadFailed() {
+        let now = Date()
+        let read   = TerminalStatus.failed(exitCode: 1, duration: 1, finishedAt: now,
+                                            agent: .claude, summary: nil,
+                                            readAt: Date(timeIntervalSince1970: 99))
+        let unread = TerminalStatus.failed(exitCode: 1, duration: 2, finishedAt: now,
+                                            agent: .claude)
+        let agg = TerminalStatus.aggregate([read, unread])
+        guard case .failed(_, _, _, _, _, let r) = agg else {
+            XCTFail("Expected .failed"); return
+        }
+        XCTAssertNil(r)
+    }
+
+    func testAggregateAllReadSuccessStaysRead() {
+        let now = Date()
+        let readAt = Date(timeIntervalSince1970: 99)
+        let a = TerminalStatus.success(exitCode: 0, duration: 1, finishedAt: now,
+                                        agent: .claude, summary: nil, readAt: readAt)
+        let b = TerminalStatus.success(exitCode: 0, duration: 2, finishedAt: now,
+                                        agent: .claude, summary: nil, readAt: readAt)
+        let agg = TerminalStatus.aggregate([a, b])
+        guard case .success(_, _, _, _, _, let r) = agg else {
+            XCTFail("Expected .success"); return
+        }
+        XCTAssertNotNil(r)
+    }
+
+    func testAggregatePriorityLadderUnchangedByReadAt() {
+        // needsInput still beats any success regardless of read state.
+        let now = Date()
+        let readSuccess = TerminalStatus.success(exitCode: 0, duration: 1, finishedAt: now,
+                                                  agent: .claude, summary: nil,
+                                                  readAt: Date(timeIntervalSince1970: 99))
+        let inputs: [TerminalStatus] = [readSuccess, .needsInput(since: now)]
+        XCTAssertEqual(TerminalStatus.aggregate(inputs).priorityCaseName, "needsInput")
+    }
 }
 
 private extension TerminalStatus {
