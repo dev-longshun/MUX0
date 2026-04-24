@@ -18,11 +18,12 @@ struct SettingsTabBarView: View {
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: TabBarView.stripRadius, style: .continuous)
                     .fill(Color(theme.sidebar).opacity(opacity))
+                // 6 个固定 section 均分 strip 宽度：每个 pill 上限 tabItemWidth（140pt），
+                // 窗口窄到装不下时整体等比缩小，避免固定 140pt 总宽 (~860pt) 撑破卡片右缘。
                 HStack(spacing: TabBarView.pillInset) {
                     ForEach(SettingsSection.allCases) { section in
                         pill(for: section)
                     }
-                    Spacer(minLength: 0)
                 }
                 .padding(.horizontal, TabBarView.pillInset)
             }
@@ -40,16 +41,24 @@ struct SettingsTabBarView: View {
 
     private func pill(for section: SettingsSection) -> some View {
         let isSelected = selection == section
+        let pillHeight = TabBarView.height - 2 * TabBarView.pillInset
         return Button {
             selection = section
         } label: {
-            // 固定宽度 / 字号与 TabItemView 对齐：140pt、DT.Font.small、文字左对齐 10pt margin。
+            // 字号与 TabItemView 对齐：DT.Font.small、文字左对齐 10pt margin。
+            // Text 用 maxWidth .infinity 填满 button label；button 自身再用
+            // maxWidth tabItemWidth 设上限，HStack 因此能均分 strip 宽度，
+            // 窗口窄时 6 个 pill 等比缩小，避免溢出；窗口宽时停在 140pt。
             Text(section.label)
                 .font(Font(DT.Font.small))
                 .foregroundColor(Color(isSelected ? theme.textPrimary : theme.textSecondary))
+                .lineLimit(1)
+                .truncationMode(.tail)
                 .padding(.leading, 10)
-                .frame(width: TabBarView.tabItemWidth,
-                       height: TabBarView.height - 2 * TabBarView.pillInset,
+                .padding(.trailing, 6)
+                .frame(maxWidth: .infinity,
+                       minHeight: pillHeight,
+                       maxHeight: pillHeight,
                        alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: TabBarView.pillRadius, style: .continuous)
@@ -59,6 +68,7 @@ struct SettingsTabBarView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .frame(maxWidth: TabBarView.tabItemWidth)
         .onHover { inside in
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
