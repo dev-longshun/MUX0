@@ -51,5 +51,6 @@ struct SidebarListBridge: NSViewRepresentable {
         view.onRename        = { id, name in store.renameWorkspace(id: id, to: name) }
         view.onReorder       = { from, to in store.moveWorkspace(from: IndexSet([from]), to: to) }
         view.onRequestDelete = { id in onRequestDelete(id) }
+        view.onSetDefaultCommand = { id, command in store.updateDefaultCommand(workspaceId: id, command: command) }
     }
 }

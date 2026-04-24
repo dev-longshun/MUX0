@@ -225,12 +225,14 @@ final class GhosttyBridge {
     func newSurface(nsView: NSView,
                     scaleFactor: Double,
                     workingDirectory: String?,
+                    command: String?,
                     terminalId: UUID) -> ghostty_surface_t? {
         guard isInitialized, let appHandle = app else { return nil }
         Self.envLock.lock()
         defer { Self.envLock.unlock() }
 
         setenv("MUX0_TERMINAL_ID", terminalId.uuidString, 1)
+        let initialInput = WorkspaceDefaultCommand.startupInput(for: command)
 
         var surfCfg = ghostty_surface_config_new()
         surfCfg.scale_factor = scaleFactor
@@ -243,14 +245,28 @@ final class GhosttyBridge {
         // owning view so the callback can look up the surface and answer paste requests.
         surfCfg.userdata = Unmanaged.passUnretained(nsView).toOpaque()
 
-        // `working_directory` must reference a buffer that stays valid for the whole
-        // `ghostty_surface_new` call. `withCString` keeps the UTF-8 bytes pinned for
-        // the duration of the closure — the earlier `(wd as NSString).utf8String`
-        // form let ARC deallocate the temporary NSString before ghostty copied it,
-        // leaving a dangling pointer (Release-mode reproducible).
-        if let wd = workingDirectory {
+        // Both `working_directory` and `initial_input` must reference buffers that stay
+        // valid for the whole `ghostty_surface_new` call. Use nested `withCString`
+        // calls to keep the UTF-8 bytes pinned. We intentionally send workspace
+        // commands as initial shell input instead of Ghostty's `command` field:
+        // if an SSH command exits quickly, the user lands back in their shell
+        // rather than Ghostty treating the surface's main process as failed.
+        if let wd = workingDirectory, let input = initialInput {
+            return wd.withCString { wdPtr in
+                input.withCString { inputPtr in
+                    surfCfg.working_directory = wdPtr
+                    surfCfg.initial_input = inputPtr
+                    return ghostty_surface_new(appHandle, &surfCfg)
+                }
+            }
+        } else if let wd = workingDirectory {
             return wd.withCString { ptr in
                 surfCfg.working_directory = ptr
+                return ghostty_surface_new(appHandle, &surfCfg)
+            }
+        } else if let input = initialInput {
+            return input.withCString { ptr in
+                surfCfg.initial_input = ptr
                 return ghostty_surface_new(appHandle, &surfCfg)
             }
         }
