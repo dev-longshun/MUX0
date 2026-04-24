@@ -78,42 +78,46 @@ final class TerminalStatusIconViewTests: XCTestCase {
     private static let darkTheme = AppTheme.systemFallback(isDark: true)
 
     func testUnreadSuccessIsSolidFill() {
-        let style = TerminalStatusIconView.renderStyle(
+        guard let style = TerminalStatusIconView.renderStyle(
             for: .success(exitCode: 0, duration: 1, finishedAt: Date(), agent: .claude),
             theme: Self.darkTheme)
-        XCTAssertEqual(style?.fill, Self.darkTheme.success)
-        XCTAssertEqual(style?.stroke, NSColor.clear)
-        XCTAssertEqual(style?.lineWidth, 0)
+        else { XCTFail("renderStyle must return non-nil for .success"); return }
+        XCTAssertEqual(style.fill, Self.darkTheme.success)
+        XCTAssertEqual(style.stroke, NSColor.clear)
+        XCTAssertEqual(style.lineWidth, 0)
     }
 
     func testReadSuccessIsHollowStroke() {
-        let style = TerminalStatusIconView.renderStyle(
+        guard let style = TerminalStatusIconView.renderStyle(
             for: .success(exitCode: 0, duration: 1, finishedAt: Date(),
                           agent: .claude, summary: nil,
                           readAt: Date(timeIntervalSince1970: 99)),
             theme: Self.darkTheme)
-        XCTAssertEqual(style?.fill, NSColor.clear)
-        XCTAssertEqual(style?.stroke, Self.darkTheme.success)
-        XCTAssertEqual(style?.lineWidth, 1)
+        else { XCTFail("renderStyle must return non-nil for .success"); return }
+        XCTAssertEqual(style.fill, NSColor.clear)
+        XCTAssertEqual(style.stroke, Self.darkTheme.success)
+        XCTAssertEqual(style.lineWidth, 1)
     }
 
     func testUnreadFailedIsSolidFill() {
-        let style = TerminalStatusIconView.renderStyle(
+        guard let style = TerminalStatusIconView.renderStyle(
             for: .failed(exitCode: 1, duration: 1, finishedAt: Date(), agent: .claude),
             theme: Self.darkTheme)
-        XCTAssertEqual(style?.fill, Self.darkTheme.danger)
-        XCTAssertEqual(style?.stroke, NSColor.clear)
-        XCTAssertEqual(style?.lineWidth, 0)
+        else { XCTFail("renderStyle must return non-nil for .failed"); return }
+        XCTAssertEqual(style.fill, Self.darkTheme.danger)
+        XCTAssertEqual(style.stroke, NSColor.clear)
+        XCTAssertEqual(style.lineWidth, 0)
     }
 
     func testReadFailedIsHollowStroke() {
-        let style = TerminalStatusIconView.renderStyle(
+        guard let style = TerminalStatusIconView.renderStyle(
             for: .failed(exitCode: 1, duration: 1, finishedAt: Date(),
                          agent: .claude, summary: nil,
                          readAt: Date(timeIntervalSince1970: 99)),
             theme: Self.darkTheme)
-        XCTAssertEqual(style?.fill, NSColor.clear)
-        XCTAssertEqual(style?.stroke, Self.darkTheme.danger)
-        XCTAssertEqual(style?.lineWidth, 1)
+        else { XCTFail("renderStyle must return non-nil for .failed"); return }
+        XCTAssertEqual(style.fill, NSColor.clear)
+        XCTAssertEqual(style.stroke, Self.darkTheme.danger)
+        XCTAssertEqual(style.lineWidth, 1)
     }
 }
