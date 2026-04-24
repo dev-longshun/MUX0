@@ -707,15 +707,22 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     }
 
     /// 输入法候选窗的锚点。macOS 会用返回的屏幕坐标矩形决定候选词浮层弹出位置。
-    /// 我们暂时没有 cell-level 的光标坐标对接，先返回 view 的左下角作为合理 fallback，
-    /// 候选窗会贴在 terminal 视图底部弹出，不会飘到屏幕中心或误显示在其他窗口上。
+    /// 通过 `ghostty_surface_ime_point` 拿 surface 内真实光标坐标（view-local、原点左下），
+    /// 再换算到屏幕坐标，候选窗即可贴在文字光标下方。surface 缺失时回退到 view 左下角。
     func firstRect(
         forCharacterRange range: NSRange,
         actualRange: NSRangePointer?
     ) -> NSRect {
         guard let win = window else { return .zero }
-        let anchor = NSRect(x: 0, y: 0, width: 1, height: 1)
-        let inWindow = convert(anchor, to: nil)
+        let rectInView: NSRect
+        if let surface {
+            var x: Double = 0, y: Double = 0, w: Double = 0, h: Double = 0
+            ghostty_surface_ime_point(surface, &x, &y, &w, &h)
+            rectInView = NSRect(x: x, y: y, width: max(w, 1), height: max(h, 1))
+        } else {
+            rectInView = NSRect(x: 0, y: 0, width: 1, height: 1)
+        }
+        let inWindow = convert(rectInView, to: nil)
         return win.convertToScreen(inWindow)
     }
 
