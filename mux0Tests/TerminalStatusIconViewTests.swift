@@ -73,6 +73,24 @@ final class TerminalStatusIconViewTests: XCTestCase {
         XCTAssertEqual(t, "Claude: turn had tool errors · 15s")
     }
 
+    func testReadSuccessTooltipAppendsReadMarker() {
+        let t = TerminalStatusIconView.tooltipText(
+            for: .success(exitCode: 0, duration: 12, finishedAt: now,
+                          agent: .claude, summary: nil,
+                          readAt: Date(timeIntervalSince1970: 99))
+        )
+        XCTAssertEqual(t, "Claude: turn finished · 12s · read")
+    }
+
+    func testReadFailedTooltipAppendsReadMarkerBeforeSummary() {
+        let t = TerminalStatusIconView.tooltipText(
+            for: .failed(exitCode: 1, duration: 15, finishedAt: now,
+                         agent: .claude, summary: "Edit failed: permission.",
+                         readAt: Date(timeIntervalSince1970: 99))
+        )
+        XCTAssertEqual(t, "Claude: turn had tool errors · 15s · read\nEdit failed: permission.")
+    }
+
     // MARK: - renderStyle (read-state visuals)
 
     private static let darkTheme = AppTheme.systemFallback(isDark: true)
