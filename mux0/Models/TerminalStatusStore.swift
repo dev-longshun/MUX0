@@ -76,8 +76,8 @@ final class TerminalStatusStore {
         case .running(let at, _):                  return at
         case .idle(let at):                        return at
         case .needsInput(let at):                  return at
-        case .success(_, _, let at, _, _):         return at
-        case .failed(_, _, let at, _, _):          return at
+        case .success(_, _, let at, _, _, _):      return at
+        case .failed(_, _, let at, _, _, _):       return at
         }
     }
 

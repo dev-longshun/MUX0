@@ -145,7 +145,7 @@ final class TerminalStatusTests: XCTestCase {
         let now = Date()
         let s = TerminalStatus.success(exitCode: 0, duration: 5, finishedAt: now,
                                        agent: .claude, summary: "Refactored X.")
-        if case .success(_, _, _, let agent, let summary) = s {
+        if case .success(_, _, _, let agent, let summary, _) = s {
             XCTAssertEqual(agent, .claude)
             XCTAssertEqual(summary, "Refactored X.")
         } else {
@@ -169,6 +169,46 @@ final class TerminalStatusTests: XCTestCase {
                                        agent: .claude, summary: "A")
         let b = TerminalStatus.success(exitCode: 0, duration: 1, finishedAt: now,
                                        agent: .claude, summary: "B")
+        XCTAssertNotEqual(a, b)
+    }
+
+    // MARK: - readAt modifier
+
+    func testSuccessReadAtDefaultsToNil() {
+        let now = Date()
+        let s = TerminalStatus.success(exitCode: 0, duration: 1, finishedAt: now, agent: .claude)
+        guard case .success(_, _, _, _, _, let readAt) = s else {
+            XCTFail("Expected .success"); return
+        }
+        XCTAssertNil(readAt)
+    }
+
+    func testSuccessReadAtCanBeSet() {
+        let now = Date()
+        let readAt = Date(timeIntervalSince1970: 99)
+        let s = TerminalStatus.success(exitCode: 0, duration: 1, finishedAt: now,
+                                        agent: .claude, summary: nil, readAt: readAt)
+        guard case .success(_, _, _, _, _, let actual) = s else {
+            XCTFail("Expected .success"); return
+        }
+        XCTAssertEqual(actual, readAt)
+    }
+
+    func testFailedReadAtDefaultsToNil() {
+        let now = Date()
+        let f = TerminalStatus.failed(exitCode: 1, duration: 1, finishedAt: now, agent: .claude)
+        guard case .failed(_, _, _, _, _, let readAt) = f else {
+            XCTFail("Expected .failed"); return
+        }
+        XCTAssertNil(readAt)
+    }
+
+    func testSuccessReadAtParticipatesInEquality() {
+        let now = Date()
+        let readAt = Date(timeIntervalSince1970: 99)
+        let a = TerminalStatus.success(exitCode: 0, duration: 1, finishedAt: now, agent: .claude)
+        let b = TerminalStatus.success(exitCode: 0, duration: 1, finishedAt: now,
+                                        agent: .claude, summary: nil, readAt: readAt)
         XCTAssertNotEqual(a, b)
     }
 }

@@ -149,10 +149,10 @@ final class TerminalStatusIconView: NSView {
         case .needsInput(let since):
             let elapsed = max(0, Date().timeIntervalSince(since))
             return "Needs input (\(Self.formatDuration(elapsed)) ago)"
-        case .success(_, let duration, _, let agent, let summary):
+        case .success(_, let duration, _, let agent, let summary, _):
             let prefix = "\(agent.displayName): turn finished · \(Self.formatDuration(duration))"
             return summary.map { "\(prefix)\n\($0)" } ?? prefix
-        case .failed(_, let duration, _, let agent, let summary):
+        case .failed(_, let duration, _, let agent, let summary, _):
             let prefix = "\(agent.displayName): turn had tool errors · \(Self.formatDuration(duration))"
             return summary.map { "\(prefix)\n\($0)" } ?? prefix
         }

@@ -63,7 +63,7 @@ final class HookDispatcherTests: XCTestCase {
         HookDispatcher.dispatch(makeMsg(event: .finished, agent: .claude,
                                         at: 110, exitCode: 0),
                                 settings: settings, store: store)
-        if case .success(_, _, _, let agent, _) = store.status(for: tid) {
+        if case .success(_, _, _, let agent, _, _) = store.status(for: tid) {
             XCTAssertEqual(agent, .claude)
         } else {
             XCTFail("Expected .success, got \(store.status(for: tid))")

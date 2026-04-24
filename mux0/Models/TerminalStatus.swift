@@ -19,9 +19,11 @@ enum TerminalStatus: Equatable {
     case idle(since: Date)
     case needsInput(since: Date)
     case success(exitCode: Int32, duration: TimeInterval, finishedAt: Date,
-                 agent: HookMessage.Agent, summary: String? = nil)
+                 agent: HookMessage.Agent, summary: String? = nil,
+                 readAt: Date? = nil)
     case failed(exitCode: Int32, duration: TimeInterval, finishedAt: Date,
-                agent: HookMessage.Agent, summary: String? = nil)
+                agent: HookMessage.Agent, summary: String? = nil,
+                readAt: Date? = nil)
 
     /// Aggregation priority (higher wins):
     /// needsInput > running > failed > success > idle > neverRan
