@@ -76,14 +76,34 @@ final class TerminalStatusStore {
         case .running(let at, _):                  return at
         case .idle(let at):                        return at
         case .needsInput(let at):                  return at
-        case .success(_, _, let at, _, _):         return at
-        case .failed(_, _, let at, _, _):          return at
+        case .success(_, _, let at, _, _, _):      return at
+        case .failed(_, _, let at, _, _, _):       return at
         }
     }
 
     /// Drop the entry (e.g. when the terminal is closed). Subsequent reads return `.neverRan`.
     func forget(terminalId: UUID) {
         storage.removeValue(forKey: terminalId)
+    }
+
+    /// Mark entries as "read" by stamping `readAt` on any `.success` / `.failed`
+    /// with `readAt == nil`. Idempotent: entries already read keep their original
+    /// readAt. Ids not matching `.success` / `.failed` (or not in storage) are
+    /// no-ops. Called from `ContentView` when the user switches workspaces/tabs
+    /// so on-screen terminal-state dots fade from solid to hollow.
+    func markRead(terminalIds: [UUID], at now: Date = Date()) {
+        for id in terminalIds {
+            switch storage[id] {
+            case .success(let ec, let dur, let fa, let agent, let summary, nil):
+                storage[id] = .success(exitCode: ec, duration: dur, finishedAt: fa,
+                                        agent: agent, summary: summary, readAt: now)
+            case .failed(let ec, let dur, let fa, let agent, let summary, nil):
+                storage[id] = .failed(exitCode: ec, duration: dur, finishedAt: fa,
+                                       agent: agent, summary: summary, readAt: now)
+            default:
+                continue
+            }
+        }
     }
 
     /// Aggregate over a bag of ids using priority running > failed > success > neverRan.

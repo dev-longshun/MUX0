@@ -62,15 +62,37 @@ final class TerminalStatusIconView: NSView {
         }
     }
 
-    private func render() {
-        let rect = bounds.insetBy(dx: 1, dy: 1)
+    /// Pure style function used by `render()` to paint the ellipse layer.
+    /// Returns nil for kinds that draw a custom path (e.g. `.running`'s 270° arc).
+    static func renderStyle(for status: TerminalStatus, theme: AppTheme)
+        -> (fill: NSColor, stroke: NSColor, lineWidth: CGFloat)?
+    {
         switch status {
         case .neverRan:
-            shapeLayer.path = CGPath(ellipseIn: rect, transform: nil)
-            shapeLayer.fillColor = NSColor.clear.cgColor
-            shapeLayer.strokeColor = theme.textTertiary.cgColor
-            shapeLayer.lineWidth = 1
+            return (NSColor.clear, theme.textTertiary, 1)
         case .running:
+            return nil   // custom arc path; handled inline
+        case .idle:
+            return (NSColor.clear,
+                    theme.textTertiary.withAlphaComponent(0.6), 1)
+        case .needsInput:
+            return (theme.accent, NSColor.clear, 0)
+        case .success(_, _, _, _, _, let readAt):
+            if readAt != nil {
+                return (NSColor.clear, theme.success, 1)
+            }
+            return (theme.success, NSColor.clear, 0)
+        case .failed(_, _, _, _, _, let readAt):
+            if readAt != nil {
+                return (NSColor.clear, theme.danger, 1)
+            }
+            return (theme.danger, NSColor.clear, 0)
+        }
+    }
+
+    private func render() {
+        let rect = bounds.insetBy(dx: 1, dy: 1)
+        if case .running = status {
             // 270° open arc, 1.5pt stroke, accent colour
             let center = CGPoint(x: rect.midX, y: rect.midY)
             let radius = min(rect.width, rect.height) / 2
@@ -83,30 +105,13 @@ final class TerminalStatusIconView: NSView {
             shapeLayer.strokeColor = theme.accent.cgColor
             shapeLayer.lineWidth = 1.5
             shapeLayer.lineCap = .round
-        case .idle:
-            // Nearly identical to neverRan visually — distinguishable only via tooltip.
-            // Slight opacity tweak to hint "this has history" vs fresh terminal.
-            shapeLayer.path = CGPath(ellipseIn: rect, transform: nil)
-            shapeLayer.fillColor = NSColor.clear.cgColor
-            shapeLayer.strokeColor = theme.textTertiary.withAlphaComponent(0.6).cgColor
-            shapeLayer.lineWidth = 1
-        case .needsInput:
-            // Amber solid fill. Priority status — draws attention without animation.
-            shapeLayer.path = CGPath(ellipseIn: rect, transform: nil)
-            shapeLayer.fillColor = theme.accent.cgColor
-            shapeLayer.strokeColor = NSColor.clear.cgColor
-            shapeLayer.lineWidth = 0
-        case .success:
-            shapeLayer.path = CGPath(ellipseIn: rect, transform: nil)
-            shapeLayer.fillColor = theme.success.cgColor
-            shapeLayer.strokeColor = NSColor.clear.cgColor
-            shapeLayer.lineWidth = 0
-        case .failed:
-            shapeLayer.path = CGPath(ellipseIn: rect, transform: nil)
-            shapeLayer.fillColor = theme.danger.cgColor
-            shapeLayer.strokeColor = NSColor.clear.cgColor
-            shapeLayer.lineWidth = 0
+            return
         }
+        guard let style = Self.renderStyle(for: status, theme: theme) else { return }
+        shapeLayer.path = CGPath(ellipseIn: rect, transform: nil)
+        shapeLayer.fillColor = style.fill.cgColor
+        shapeLayer.strokeColor = style.stroke.cgColor
+        shapeLayer.lineWidth = style.lineWidth
     }
 
     private func startSpinAnimation() {
@@ -149,11 +154,13 @@ final class TerminalStatusIconView: NSView {
         case .needsInput(let since):
             let elapsed = max(0, Date().timeIntervalSince(since))
             return "Needs input (\(Self.formatDuration(elapsed)) ago)"
-        case .success(_, let duration, _, let agent, let summary):
-            let prefix = "\(agent.displayName): turn finished · \(Self.formatDuration(duration))"
+        case .success(_, let duration, _, let agent, let summary, let readAt):
+            let head = "\(agent.displayName): turn finished · \(Self.formatDuration(duration))"
+            let prefix = readAt != nil ? "\(head) · read" : head
             return summary.map { "\(prefix)\n\($0)" } ?? prefix
-        case .failed(_, let duration, _, let agent, let summary):
-            let prefix = "\(agent.displayName): turn had tool errors · \(Self.formatDuration(duration))"
+        case .failed(_, let duration, _, let agent, let summary, let readAt):
+            let head = "\(agent.displayName): turn had tool errors · \(Self.formatDuration(duration))"
+            let prefix = readAt != nil ? "\(head) · read" : head
             return summary.map { "\(prefix)\n\($0)" } ?? prefix
         }
     }

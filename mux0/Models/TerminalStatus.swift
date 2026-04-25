@@ -19,9 +19,11 @@ enum TerminalStatus: Equatable {
     case idle(since: Date)
     case needsInput(since: Date)
     case success(exitCode: Int32, duration: TimeInterval, finishedAt: Date,
-                 agent: HookMessage.Agent, summary: String? = nil)
+                 agent: HookMessage.Agent, summary: String? = nil,
+                 readAt: Date? = nil)
     case failed(exitCode: Int32, duration: TimeInterval, finishedAt: Date,
-                agent: HookMessage.Agent, summary: String? = nil)
+                agent: HookMessage.Agent, summary: String? = nil,
+                readAt: Date? = nil)
 
     /// Aggregation priority (higher wins):
     /// needsInput > running > failed > success > idle > neverRan
@@ -41,7 +43,23 @@ enum TerminalStatus: Equatable {
     /// Ties keep the first member (e.g. two successes → the first). Empty input → `.neverRan`.
     static func aggregate(_ statuses: [TerminalStatus]) -> TerminalStatus {
         statuses.reduce(TerminalStatus.neverRan) { current, next in
-            next.priority > current.priority ? next : current
+            if next.priority > current.priority { return next }
+            if next.priority == current.priority {
+                // Same kind — prefer unread (readAt == nil) so a single
+                // unread entry pulls the aggregate to "needs attention".
+                if current.isRead && !next.isRead { return next }
+            }
+            return current
+        }
+    }
+
+    /// True when this status has been acknowledged by the user.
+    /// Only `.success` / `.failed` can be read; other kinds return `false`.
+    var isRead: Bool {
+        switch self {
+        case .success(_, _, _, _, _, let readAt): return readAt != nil
+        case .failed(_, _, _, _, _, let readAt):  return readAt != nil
+        default: return false
         }
     }
 }
