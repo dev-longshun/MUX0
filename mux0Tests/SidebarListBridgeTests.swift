@@ -26,7 +26,8 @@ final class SidebarListBridgeTests: XCTestCase {
             metadata: metadata,
             metadataTick: tick,
             languageTick: 0,
-            onRequestDelete: { _ in }
+            onRequestDelete: { _ in },
+            onRequestEditCommand: { _, _ in }
         )
         let host = NSHostingView(rootView: AnyView(bridge))
         host.frame = NSRect(x: 0, y: 0, width: 200, height: 400)
@@ -61,6 +62,19 @@ final class SidebarListBridgeTests: XCTestCase {
         return count
     }
 
+    private func rowHeights(in listView: WorkspaceListView) -> [CGFloat] {
+        var rows: [NSView] = []
+        var queue: [NSView] = [listView]
+        while let v = queue.first {
+            queue.removeFirst()
+            if String(describing: type(of: v)).contains("WorkspaceRowItemView") {
+                rows.append(v)
+            }
+            queue.append(contentsOf: v.subviews)
+        }
+        return rows.sorted { $0.frame.minY < $1.frame.minY }.map(\.frame.height)
+    }
+
     // MARK: tests
 
     func testMakeProducesListViewWithCorrectRowCount() throws {
@@ -91,5 +105,18 @@ final class SidebarListBridgeTests: XCTestCase {
         host.layout()
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         XCTAssertEqual(rowCount(in: listView), 1)
+    }
+
+    func testShortDefaultCommandKeepsBaseRowHeight() throws {
+        let store = makeStore(workspaceCount: 2)
+        store.updateDefaultCommand(workspaceId: store.workspaces[1].id, command: "ssh inx-xe9680")
+
+        let (_, listView) = try materialize(store)
+        listView.layoutSubtreeIfNeeded()
+
+        let heights = rowHeights(in: listView)
+        XCTAssertEqual(heights.count, 2)
+        XCTAssertEqual(heights[0], WorkspaceListView.baseRowHeight)
+        XCTAssertEqual(heights[1], WorkspaceListView.baseRowHeight)
     }
 }

@@ -18,6 +18,9 @@ final class WorkspaceListView: NSView {
     var onRename: ((UUID, String) -> Void)?
     var onReorder: ((Int, Int) -> Void)?       // (fromIndex, toIndex) insertion 0…count
     var onRequestDelete: ((UUID) -> Void)?
+    /// AppKit row bubbles the edit request up (workspaceId + currentCommand);
+    /// SwiftUI shell presents the alert and writes back via WorkspaceStore on save.
+    var onRequestEditCommand: ((UUID, String) -> Void)?
 
     private let scrollView = NSScrollView()
     private let rowsContainer = FlippedRowsContainer()
@@ -37,7 +40,8 @@ final class WorkspaceListView: NSView {
     fileprivate var draggingId: UUID?
     fileprivate var previewInsertionIndex: Int?
 
-    static let rowHeight: CGFloat = 44
+    static let baseRowHeight: CGFloat = 44
+    static let rowHeight: CGFloat = baseRowHeight
     static let rowSpacing: CGFloat = 3
     static let outerHorizontalInset: CGFloat = DT.Space.sm
 
@@ -177,6 +181,7 @@ final class WorkspaceListView: NSView {
         item.onSelect        = { [weak self] in self?.onSelect?(id) }
         item.onRename        = { [weak self] newName in self?.onRename?(id, newName) }
         item.onRequestDelete = { [weak self] in self?.onRequestDelete?(id) }
+        item.onRequestEditCommand = { [weak self] current in self?.onRequestEditCommand?(id, current) }
         item.onDragEnded     = { [weak self] in self?.cleanupAfterDrag() }
     }
 
@@ -205,15 +210,16 @@ final class WorkspaceListView: NSView {
         return copy
     }
 
-    /// 根据鼠标 y 算应插入的位置（0…workspaces.count）。基于原始 workspaces 顺序的 slot 中线。
-    /// rowsContainer 已 flipped → y=0 在顶部，pointInContainer.y 即 distance-from-top。
+    /// 根据鼠标 y 算应插入的位置（0…workspaces.count）。使用当前行 frame 中线，
+    /// 这样拖拽命中区域会跟随 default command 造成的动态行高。
     private func insertionIndex(at pointInSelf: NSPoint) -> Int {
         guard !workspaces.isEmpty else { return 0 }
         let pointInContainer = rowsContainer.convert(pointInSelf, from: self)
-        let rowH = Self.rowHeight + Self.rowSpacing
-        for i in 0..<workspaces.count {
-            let midY = (CGFloat(i) + 0.5) * rowH
-            if pointInContainer.y < midY { return i }
+        let rows = rowsContainer.subviews
+            .compactMap { $0 as? WorkspaceRowItemView }
+            .sorted { $0.frame.minY < $1.frame.minY }
+        for (idx, row) in rows.enumerated() {
+            if pointInContainer.y < row.frame.midY { return idx }
         }
         return workspaces.count
     }
@@ -224,14 +230,15 @@ final class WorkspaceListView: NSView {
         let items = rowsContainer.subviews.compactMap { $0 as? WorkspaceRowItemView }
         let ordered = previewOrdered(items: items)
         let w = max(0, scrollView.contentSize.width - Self.outerHorizontalInset * 2)
-        let h = Self.rowHeight
-        let totalH = CGFloat(ordered.count) * (h + Self.rowSpacing) - (ordered.isEmpty ? 0 : Self.rowSpacing)
+        let heights = ordered.map { $0.preferredHeight(forWidth: w) }
+        let totalH = heights.reduce(0, +) + CGFloat(max(0, ordered.count - 1)) * Self.rowSpacing
         let containerH = max(totalH, scrollView.contentSize.height)
 
         let apply = {
             // flipped 容器 → y=0 顶部，向下递增
             var y: CGFloat = 0
-            for item in ordered {
+            for (idx, item) in ordered.enumerated() {
+                let h = heights[idx]
                 let frame = NSRect(x: Self.outerHorizontalInset, y: y, width: w, height: h)
                 if animated {
                     item.animator().frame = frame
@@ -323,6 +330,9 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
     var onSelect: (() -> Void)?
     var onRename: ((String) -> Void)?
     var onRequestDelete: (() -> Void)?
+    /// Bubbles the workspace's current default command up so the SwiftUI shell
+    /// can seed its alert TextField. Save/cancel happen entirely in the shell.
+    var onRequestEditCommand: ((String) -> Void)?
     var onDragEnded: (() -> Void)?
 
     var isDragGhost: Bool = false {
@@ -335,6 +345,7 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
     private let backgroundLayerView = NSView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
+    private let commandLabel = NSTextField(labelWithString: "")
     private let prBadge = NSTextField(labelWithString: "")
     private let statusIcon = TerminalStatusIconView(frame: .zero)
     fileprivate let renameField = NSTextField()
@@ -398,6 +409,15 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
         branchLabel.font = DT.Font.mono
         addSubview(branchLabel)
 
+        commandLabel.isBezeled = false
+        commandLabel.drawsBackground = false
+        commandLabel.isEditable = false
+        commandLabel.isSelectable = false
+        commandLabel.lineBreakMode = .byWordWrapping
+        commandLabel.maximumNumberOfLines = 3
+        commandLabel.font = DT.Font.mono
+        addSubview(commandLabel)
+
         prBadge.isBezeled = false
         prBadge.drawsBackground = false
         prBadge.isEditable = false
@@ -424,6 +444,7 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
 
         let hPad = DT.Space.md
         let topPad = DT.Space.xs
+        let lineGap = DT.Space.xxs
         let titleH = ceil(titleLabel.intrinsicContentSize.height)
         let branchH = ceil(branchLabel.intrinsicContentSize.height)
 
@@ -463,6 +484,52 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
         branchLabel.frame = NSRect(
             x: hPad, y: topPad,
             width: bounds.width - hPad * 2, height: branchH)
+
+        var nextY = titleFrame.minY - lineGap
+        if !commandLabel.isHidden {
+            let cmdH = commandLabelHeight(forWidth: bounds.width - hPad * 2)
+            commandLabel.frame = NSRect(
+                x: hPad,
+                y: max(topPad, nextY - cmdH),
+                width: bounds.width - hPad * 2,
+                height: cmdH)
+            nextY = commandLabel.frame.minY - lineGap
+        }
+
+        if !branchLabel.isHidden, !commandLabel.isHidden {
+            branchLabel.frame = NSRect(
+                x: hPad,
+                y: max(topPad, nextY - branchH),
+                width: bounds.width - hPad * 2,
+                height: branchH)
+        }
+    }
+
+    fileprivate func preferredHeight(forWidth width: CGFloat) -> CGFloat {
+        guard workspace.defaultCommand?.isEmpty == false else {
+            return WorkspaceListView.baseRowHeight
+        }
+
+        let contentWidth = max(0, width - DT.Space.md * 2)
+        let titleH = ceil(titleLabel.intrinsicContentSize.height)
+        let branchH = branchLabel.isHidden ? 0 : ceil(branchLabel.intrinsicContentSize.height)
+        let branchGap = branchLabel.isHidden ? 0 : DT.Space.xxs
+        let commandH = commandLabelHeight(forWidth: contentWidth)
+        return max(
+            WorkspaceListView.baseRowHeight,
+            DT.Space.xs + titleH + DT.Space.xxs + commandH + branchGap + branchH + DT.Space.xs)
+    }
+
+    private func commandLabelHeight(forWidth width: CGFloat) -> CGFloat {
+        guard !commandLabel.stringValue.isEmpty else { return 0 }
+        let attr = NSAttributedString(
+            string: commandLabel.stringValue,
+            attributes: [.font: commandLabel.font ?? DT.Font.mono])
+        let measured = attr.boundingRect(
+            with: NSSize(width: max(1, width), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]).height
+        let lineHeight = ceil((commandLabel.font ?? DT.Font.mono).boundingRectForFont.height)
+        return min(ceil(measured), lineHeight * 3)
     }
 
     func refresh(workspace: Workspace, isSelected: Bool,
@@ -531,8 +598,6 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
 
     override func rightMouseDown(with event: NSEvent) {
         let menu = NSMenu()
-        // autoenablesItems=true 会把 isEnabled=false 覆盖回 true，
-        // 这里需要严格遵守我们设的 enabled 状态。
         menu.autoenablesItems = false
 
         let renameItem = NSMenuItem(
@@ -541,6 +606,13 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
             keyEquivalent: "")
         renameItem.target = self
         menu.addItem(renameItem)
+
+        let commandItem = NSMenuItem(
+            title: L10n.string("sidebar.row.commandPanel.editTitle"),
+            action: #selector(requestEditCommandAction),
+            keyEquivalent: "")
+        commandItem.target = self
+        menu.addItem(commandItem)
 
         menu.addItem(.separator())
 
@@ -556,6 +628,10 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
 
     @objc fileprivate func deleteAction() {
         onRequestDelete?()
+    }
+
+    @objc private func requestEditCommandAction() {
+        onRequestEditCommand?(workspace.defaultCommand ?? "")
     }
 
     @objc fileprivate func beginRenameAction() {
@@ -649,6 +725,13 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
             branchLabel.stringValue = ""
             branchLabel.isHidden = true
         }
+        if let cmd = workspace.defaultCommand, !cmd.isEmpty {
+            commandLabel.stringValue = "$ \(cmd)"
+            commandLabel.isHidden = false
+        } else {
+            commandLabel.stringValue = ""
+            commandLabel.isHidden = true
+        }
         if let pr = metadata.prStatus {
             prBadge.stringValue = pr.uppercased()
             prBadge.isHidden = false
@@ -673,6 +756,7 @@ private final class WorkspaceRowItemView: NSView, NSTextFieldDelegate, NSDraggin
             titleLabel.font = DT.Font.body
         }
         branchLabel.textColor = theme.textTertiary
+        commandLabel.textColor = theme.textTertiary
         prBadge.textColor = theme.textTertiary
         renameField.textColor = theme.textPrimary
         needsDisplay = true

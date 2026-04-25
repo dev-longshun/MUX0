@@ -554,6 +554,34 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "删除" } }
       }
     },
+    "sidebar.row.commandPanel.editTitle" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Edit Default Command" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "编辑默认命令" } }
+      }
+    },
+    "sidebar.row.commandPanel.cancel" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
+      }
+    },
+    "sidebar.row.commandPanel.placeholder" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "e.g. ssh user@server" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "例如 ssh user@server" } }
+      }
+    },
+    "sidebar.row.commandPanel.save" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Save" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "保存" } }
+      }
+    },
     "sidebar.row.rename" : {
       "extractionState" : "manual",
       "localizations" : {

@@ -34,6 +34,11 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     /// callbacks (e.g. COMMAND_FINISHED) back to TerminalStatusStore.
     var terminalId: UUID?
 
+    /// The workspace-level default command to type into the initial shell when this
+    /// surface is created. Set by TabContentView before the view enters a window.
+    /// Only used on first surface creation (viewDidMoveToWindow when surface == nil).
+    var command: String?
+
     // MARK: - Scrollbar state (consumed by SurfaceScrollView)
 
     /// Rows reported by ghostty's SCROLLBAR action.
@@ -238,6 +243,7 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
                 nsView: self,
                 scaleFactor: scale,
                 workingDirectory: validated,
+                command: command,
                 terminalId: terminalId ?? UUID()
             )
             if let s = surface {

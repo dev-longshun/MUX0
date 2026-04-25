@@ -52,6 +52,15 @@ final class WorkspaceStore {
         save()
     }
 
+    func updateDefaultCommand(workspaceId: UUID, command: String?) {
+        guard let idx = wsIndex(workspaceId) else { return }
+        let trimmed = command?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newValue = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        guard workspaces[idx].defaultCommand != newValue else { return }
+        workspaces[idx].defaultCommand = newValue
+        save()
+    }
+
     // MARK: - Reorder
 
     /// 重排 workspace 顺序。`destination` 使用插入位置语义（0…workspaces.count）。

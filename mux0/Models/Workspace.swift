@@ -146,15 +146,25 @@ struct Workspace: Codable, Identifiable, Equatable {
     var name: String
     var tabs: [TerminalTab]
     var selectedTabId: UUID?
+    var defaultCommand: String?
 
-    init(id: UUID = UUID(), name: String) {
+    init(id: UUID = UUID(), name: String, defaultCommand: String? = nil) {
         self.id = id
         self.name = name
+        self.defaultCommand = defaultCommand
         self.tabs = []
         self.selectedTabId = nil
     }
 
     var selectedTab: TerminalTab? {
         tabs.first { $0.id == selectedTabId }
+    }
+}
+
+enum WorkspaceDefaultCommand {
+    static func startupInput(for command: String?) -> String? {
+        let trimmed = command?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return nil }
+        return "\(trimmed)\n"
     }
 }
