@@ -79,12 +79,12 @@ final class TerminalStatusIconView: NSView {
             return (theme.accent, NSColor.clear, 0)
         case .success(_, _, _, _, _, let readAt):
             if readAt != nil {
-                return (NSColor.clear, theme.success, 1)
+                return (NSColor.clear, theme.textTertiary, 1)
             }
             return (theme.success, NSColor.clear, 0)
         case .failed(_, _, _, _, _, let readAt):
             if readAt != nil {
-                return (NSColor.clear, theme.danger, 1)
+                return (NSColor.clear, theme.textTertiary, 1)
             }
             return (theme.danger, NSColor.clear, 0)
         }

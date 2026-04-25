@@ -113,7 +113,7 @@ final class TerminalStatusIconViewTests: XCTestCase {
             theme: Self.darkTheme)
         else { XCTFail("renderStyle must return non-nil for .success"); return }
         XCTAssertEqual(style.fill, NSColor.clear)
-        XCTAssertEqual(style.stroke, Self.darkTheme.success)
+        XCTAssertEqual(style.stroke, Self.darkTheme.textTertiary)
         XCTAssertEqual(style.lineWidth, 1)
     }
 
@@ -135,7 +135,7 @@ final class TerminalStatusIconViewTests: XCTestCase {
             theme: Self.darkTheme)
         else { XCTFail("renderStyle must return non-nil for .failed"); return }
         XCTAssertEqual(style.fill, NSColor.clear)
-        XCTAssertEqual(style.stroke, Self.darkTheme.danger)
+        XCTAssertEqual(style.stroke, Self.darkTheme.textTertiary)
         XCTAssertEqual(style.lineWidth, 1)
     }
 }
