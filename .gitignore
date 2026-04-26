@@ -3,12 +3,24 @@
 
 # Build outputs
 build/
+.build/
+.swiftpm/
+.zig-cache/
+zig-cache/
 *.o
 *.d
 *.profraw
+*.dSYM/
+*.xcarchive/
+*.xcresult/
+*.dmg
 
 # Xcode derived data
 *.xcuserdata
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.moved-aside
 DerivedData/
 
 # Local signing override (opt-in, see Local.xcconfig.example)

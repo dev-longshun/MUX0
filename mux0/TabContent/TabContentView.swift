@@ -96,11 +96,6 @@ final class TabContentView: NSView {
         installKeyMonitor()
     }
 
-    deinit {
-        removeKeyMonitor()
-        removeFocusObservers()
-    }
-
     override func layout() {
         super.layout()
         let inset = DT.Space.xs
@@ -512,5 +507,6 @@ final class TabContentView: NSView {
     deinit {
         NotificationCenter.default.removeObserver(self)
         removeKeyMonitor()
+        removeFocusObservers()
     }
 }
