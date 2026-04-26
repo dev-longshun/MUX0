@@ -753,6 +753,98 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
         return ghostty_input_mods_e(rawValue: rawValue)
     }
 
+    // MARK: - Accessibility
+    //
+    // Dictation and assistive-input tools such as Typeless first ask macOS what
+    // kind of UI element is focused. Without these overrides, AppKit exposes this
+    // custom Metal-backed terminal view as a generic view even though NSTextInputClient
+    // can accept inserted text. Report it as a text area so those tools recognize
+    // the focused pane as a valid text destination.
+
+    override func isAccessibilityElement() -> Bool { true }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
+
+    override func accessibilityHelp() -> String? { "Terminal content area" }
+
+    override func accessibilityValue() -> Any? {
+        readTerminalText(
+            from: GHOSTTY_POINT_SCREEN,
+            topLeft: GHOSTTY_POINT_COORD_TOP_LEFT,
+            bottomRight: GHOSTTY_POINT_COORD_BOTTOM_RIGHT
+        )
+    }
+
+    override func accessibilitySelectedTextRange() -> NSRange {
+        readSelectionRange()
+    }
+
+    override func accessibilitySelectedText() -> String? {
+        guard let selected = readSelectedText(), !selected.isEmpty else { return nil }
+        return selected
+    }
+
+    override func accessibilityNumberOfCharacters() -> Int {
+        accessibilityTextValue.count
+    }
+
+    override func accessibilityVisibleCharacterRange() -> NSRange {
+        let count = accessibilityTextValue.count
+        return NSRange(location: 0, length: count)
+    }
+
+    override func accessibilityLine(for index: Int) -> Int {
+        let content = accessibilityTextValue
+        let safeIndex = max(0, min(index, content.count))
+        let end = content.index(content.startIndex, offsetBy: safeIndex)
+        return content[..<end].filter { $0 == "\n" }.count
+    }
+
+    override func accessibilityString(for range: NSRange) -> String? {
+        let content = accessibilityTextValue
+        guard let swiftRange = Range(range, in: content) else { return nil }
+        return String(content[swiftRange])
+    }
+
+    private var accessibilityTextValue: String {
+        (accessibilityValue() as? String) ?? ""
+    }
+
+    private func readSelectionRange() -> NSRange {
+        guard let surface else { return NSRange(location: NSNotFound, length: 0) }
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_selection(surface, &text) else {
+            return NSRange(location: NSNotFound, length: 0)
+        }
+        defer { ghostty_surface_free_text(surface, &text) }
+        return NSRange(location: Int(text.offset_start), length: Int(text.offset_len))
+    }
+
+    private func readSelectedText() -> String? {
+        guard let surface else { return nil }
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_selection(surface, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        return String(cString: text.text)
+    }
+
+    private func readTerminalText(
+        from tag: ghostty_point_tag_e,
+        topLeft: ghostty_point_coord_e,
+        bottomRight: ghostty_point_coord_e
+    ) -> String {
+        guard let surface else { return "" }
+        var text = ghostty_text_s()
+        let selection = ghostty_selection_s(
+            top_left: ghostty_point_s(tag: tag, coord: topLeft, x: 0, y: 0),
+            bottom_right: ghostty_point_s(tag: tag, coord: bottomRight, x: 0, y: 0),
+            rectangle: false
+        )
+        guard ghostty_surface_read_text(surface, selection, &text) else { return "" }
+        defer { ghostty_surface_free_text(surface, &text) }
+        return String(cString: text.text)
+    }
+
     // MARK: - NSTextInputClient
     //
     // 这一套方法是 macOS 文本输入系统与 ghostty 的桥：
@@ -813,7 +905,7 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     }
 
     func selectedRange() -> NSRange {
-        NSRange(location: NSNotFound, length: 0)
+        readSelectionRange()
     }
 
     func markedRange() -> NSRange {
