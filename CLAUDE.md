@@ -1,5 +1,37 @@
 # mux0
 
+## 项目基础信息
+
+- **技术栈**：Swift/AppKit + SwiftUI macOS 应用，终端引擎为 libghostty，XcodeGen 管理工程，Sparkle 自动更新。
+- **最低支持版本**：macOS 14.0+。
+- **仓库关系**：`origin` 指向二次开发 fork；`upstream` 保持指向原作者仓库，用于同步原作者更新。不要切断 remote，不要重建 git 历史。
+
+## Skills
+
+Skill 是存放在 `SKILL.md` 中的一组本地指令。
+
+### 可用 Skills
+
+- `protocol-dev`：高级技术架构师开发协议，强制执行“先谋后动”工作流，覆盖代码修改、Bug 调试、Commit 信息生成、分支合并、版本发布等流程。路径：`.claude/skills/protocol-dev/SKILL.md`
+- `repo-detach-reset`：克隆/Fork 仓库去关联与历史重置协议。仅当用户明确要求切断 remote、删除历史、重建仓库时使用。路径：`.claude/skills/repo-detach-reset/SKILL.md`
+
+### Skills 使用规则
+
+- 当用户提出代码修改、Bug 调试、生成 Commit 信息、分支合并/同步、版本发布需求时，优先读取并遵循 `protocol-dev`。
+- 当前项目目标是保留 fork 与上游连接；不要因为“fork 初始化”自动执行去关联、删除历史、删除 remote 或禁用工作流。
+- 当用户提出同步原作者更新时，使用 `upstream` 获取原仓库更新，再合并到二次开发分支。
+- 只有用户明确提出抹除克隆仓库信息、切断 upstream/origin、删除历史提交、重建 git 仓库时，才读取 `repo-detach-reset`，且必须先给方案和风险说明。
+- 文件缺失时，先简要说明问题，再按最接近的流程继续执行。
+
+## 开发协议
+
+- 任何代码变更需求，先给方案，等待用户明确授权后再执行。
+- 生成 commit 信息时必须基于真实 diff，执行 `git commit` 前需要用户确认。
+- 禁止使用 Markdown 表格，使用列表或分组描述。
+- 禁止使用 `rm` 删除文件，必须使用 `trash`。
+- 二次开发默认在 `main-fork` 分支进行；`master` 主要用于跟踪 fork 默认分支和同步上游。
+- 修改 `project.yml` 后必须运行 `xcodegen generate`；首次构建 libghostty 需 Zig 0.15.2 并运行 `./scripts/build-vendor.sh`。
+
 macOS 标签页 + 分割窗格式终端 app，以 libghostty 作为终端引擎，Swift/AppKit + SwiftUI 实现。
 
 ## Quick Start

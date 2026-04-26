@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo Detach Reset"
+  short_description: "Safely detach forks and reset repository history"
+  default_prompt: "Use $repo-detach-reset to inspect this cloned repository, explain the detachment plan, and wait for my approval before destructive steps."

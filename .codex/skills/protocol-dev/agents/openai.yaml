@@ -1,0 +1,4 @@
+interface:
+  display_name: "Protocol Dev"
+  short_description: "Plan-first coding workflow for project tasks"
+  default_prompt: "Use $protocol-dev to analyze this change request, propose a plan, and wait for my approval before editing files."
