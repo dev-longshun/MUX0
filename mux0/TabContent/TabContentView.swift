@@ -45,6 +45,8 @@ final class TabContentView: NSView {
     /// The tab whose pane is currently installed as a subview.
     private var visibleTabId: UUID?
     private var keyMonitor: Any?
+    private var focusObservers: [NSObjectProtocol] = []
+    private var isWindowKeyForTerminalFocus = false
     private var lastStatuses: [UUID: TerminalStatus] = [:]
     private var lastShowStatusIndicators: Bool = false
 
@@ -90,7 +92,13 @@ final class TabContentView: NSView {
         }
 
         subscribeNotifications()
+        installFocusObservers()
         installKeyMonitor()
+    }
+
+    deinit {
+        removeKeyMonitor()
+        removeFocusObservers()
     }
 
     override func layout() {
@@ -194,7 +202,9 @@ final class TabContentView: NSView {
         }
         pane.applyTheme(theme)
 
-        // Restore focus
+        // Restore focus only while this window is the active key window. When the
+        // window is backgrounded, keeping ghostty focus=true leaves the block cursor
+        // visible and makes the terminal look like it will receive dictation/input.
         focusTerminal(tab.focusedTerminalId)
     }
 
@@ -241,6 +251,10 @@ final class TabContentView: NSView {
 
     private func focusTerminal(_ id: UUID) {
         guard let tv = terminalViews[id] else { return }
+        guard shouldExposeTerminalFocus else {
+            GhosttyTerminalView.makeFrontmost(nil)
+            return
+        }
         GhosttyTerminalView.makeFrontmost(tv)
         window?.makeFirstResponder(tv)
     }
@@ -273,6 +287,7 @@ final class TabContentView: NSView {
         GhosttyTerminalView.makeFrontmost(nil)
         terminalViews.values.forEach { $0.isHidden = true }
         removeKeyMonitor()
+        isWindowKeyForTerminalFocus = false
     }
 
     private func removeKeyMonitor() {
@@ -281,10 +296,67 @@ final class TabContentView: NSView {
 
     func attach() {
         terminalViews.values.forEach { $0.isHidden = false }
+        isWindowKeyForTerminalFocus = window?.isKeyWindow == true && NSApp.isActive
         if let tab = store?.selectedWorkspace?.selectedTab {
             focusTerminal(tab.focusedTerminalId)
         }
         if keyMonitor == nil { installKeyMonitor() }
+    }
+
+    private var shouldExposeTerminalFocus: Bool {
+        window?.isKeyWindow == true && NSApp.isActive && isWindowKeyForTerminalFocus
+    }
+
+    private func installFocusObservers() {
+        let center = NotificationCenter.default
+        focusObservers.append(center.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self, note.object as? NSWindow === self.window else { return }
+            self.isWindowKeyForTerminalFocus = true
+            self.restoreFocusedTerminalIfPossible()
+        })
+        focusObservers.append(center.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self, note.object as? NSWindow === self.window else { return }
+            self.isWindowKeyForTerminalFocus = false
+            GhosttyTerminalView.makeFrontmost(nil)
+        })
+        focusObservers.append(center.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.isWindowKeyForTerminalFocus = self.window?.isKeyWindow == true
+            self.restoreFocusedTerminalIfPossible()
+        })
+        focusObservers.append(center.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.isWindowKeyForTerminalFocus = false
+            GhosttyTerminalView.makeFrontmost(nil)
+        })
+    }
+
+    private func removeFocusObservers() {
+        let center = NotificationCenter.default
+        focusObservers.forEach { center.removeObserver($0) }
+        focusObservers.removeAll()
+    }
+
+    private func restoreFocusedTerminalIfPossible() {
+        guard shouldExposeTerminalFocus,
+              let tab = store?.selectedWorkspace?.selectedTab else { return }
+        focusTerminal(tab.focusedTerminalId)
     }
 
     // MARK: - Notification subscriptions
