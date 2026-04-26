@@ -428,7 +428,7 @@ final class GhosttyBridge {
     private static let confirmReadClipboardCallback: ghostty_runtime_confirm_read_clipboard_cb = { _, _, _, _ in }
 
     // ghostty_runtime_write_clipboard_cb: (void*, ghostty_clipboard_e, const ghostty_clipboard_content_s*, size_t, bool) -> void
-    private static let writeClipboardCallback: ghostty_runtime_write_clipboard_cb = { _, _, content, count, _ in
+    private static let writeClipboardCallback: ghostty_runtime_write_clipboard_cb = { userdata, _, content, count, _ in
         guard let content = content, count > 0 else { return }
 
         // Ghostty hands us the selection as multiple MIME-tagged entries (typically
@@ -457,6 +457,15 @@ final class GhosttyBridge {
         pb.declareTypes(items.map { $0.0 }, owner: nil)
         for (type, str) in items {
             pb.setString(str, forType: type)
+        }
+
+        // Post toast notification so the terminal pane can flash "Copied".
+        // userdata is the owning GhosttyTerminalView (set in newSurface).
+        let view: GhosttyTerminalView? = userdata.map {
+            Unmanaged<GhosttyTerminalView>.fromOpaque($0).takeUnretainedValue()
+        }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .mux0ClipboardWritten, object: view)
         }
     }
 }

@@ -113,7 +113,10 @@ final class SplitPaneView: NSView {
         splitView?.themeDividerColor = theme.border
         splitView?.needsDisplay = true
         children.forEach { $0.applyTheme(theme) }
-        // GhosttyTerminalView manages its own colours via Ghostty config; no call needed here.
+        // Forward theme to SurfaceScrollView for the copied toast.
+        if let scroller = subviews.first(where: { $0 is SurfaceScrollView }) as? SurfaceScrollView {
+            scroller.applyTheme(theme)
+        }
     }
 
     // MARK: - Focus

@@ -25,6 +25,9 @@ final class SurfaceScrollView: NSView {
     /// Last row we sent via `scroll_to_row:N`. Skips redundant actions when the
     /// cursor drags within the same cell.
     private var lastSentRow: Int?
+    private let copiedToast = CopiedToastView(frame: .zero)
+    /// Current theme, set by the owning SplitPaneView via `applyTheme(_:)`.
+    private(set) var theme: AppTheme = .systemFallback(isDark: true)
 
     init(terminalView: GhosttyTerminalView) {
         self.terminalView = terminalView
@@ -107,6 +110,12 @@ final class SurfaceScrollView: NSView {
             object: terminalView,
             queue: .main
         ) { [weak self] _ in self?.synchronizeScrollView() })
+
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .mux0ClipboardWritten,
+            object: terminalView,
+            queue: .main
+        ) { [weak self] _ in self?.showCopiedToast() })
     }
 
     override var safeAreaInsets: NSEdgeInsets { NSEdgeInsetsZero }
@@ -181,6 +190,14 @@ final class SurfaceScrollView: NSView {
     }
 
     // MARK: - Mouse
+
+    private func showCopiedToast() {
+        copiedToast.show(in: self, theme: theme)
+    }
+
+    func applyTheme(_ theme: AppTheme) {
+        self.theme = theme
+    }
 
     /// When the OS pref is set to "legacy" scrollers, users expect the scroller
     /// to stay visible while the mouse is near it. Since we force overlay, flash

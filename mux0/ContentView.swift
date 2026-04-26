@@ -275,6 +275,9 @@ extension Notification.Name {
     static let mux0Paste                = Notification.Name("mux0.paste")
     static let mux0SelectAll            = Notification.Name("mux0.selectAll")
 
+    // Clipboard toast (fired by GhosttyBridge.writeClipboardCallback)
+    static let mux0ClipboardWritten     = Notification.Name("mux0.clipboardWritten")
+
     // Settings
     static let mux0OpenSettings         = Notification.Name("mux0.openSettings")
     static let mux0EditConfigFile       = Notification.Name("mux0.editConfigFile")

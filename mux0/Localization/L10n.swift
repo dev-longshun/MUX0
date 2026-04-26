@@ -194,6 +194,12 @@ enum L10n {
         static let ghosttyNotFoundDetail    = LocalizedStringResource("app.ghostty.notFound.detail")
     }
 
+    // MARK: - Toast
+
+    enum Toast {
+        static let copied = LocalizedStringResource("toast.copied")
+    }
+
     // MARK: - Menu
 
     enum Menu {
