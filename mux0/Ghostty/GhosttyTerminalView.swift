@@ -356,8 +356,15 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     func copySelection() -> Bool { runBindingAction("copy_to_clipboard") }
 
     /// Paste the system clipboard into the focused surface.
+    /// Text still goes through ghostty's clipboard path so terminal paste modes are
+    /// preserved. File URLs and bitmap clipboard contents are converted to local
+    /// paths and injected directly, which lets CLI agents read pasted images.
     @discardableResult
-    func pasteClipboard() -> Bool { runBindingAction("paste_from_clipboard") }
+    func pasteClipboard() -> Bool {
+        if pasteFileURLsFromClipboard() { return true }
+        if pasteImageFromClipboard() { return true }
+        return runBindingAction("paste_from_clipboard")
+    }
 
     /// Select the entire scrollback contents.
     @discardableResult
@@ -632,6 +639,56 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
             return .copy
         }
         return []
+    }
+
+    /// Paste Finder-copied files as shell-escaped local paths.
+    private func pasteFileURLsFromClipboard() -> Bool {
+        guard let s = surface else { return false }
+        let pb = NSPasteboard.general
+        let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        guard let urls = pb.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL],
+              !urls.isEmpty else { return false }
+
+        let joined = urls.map { Self.shellEscape($0.path) }.joined(separator: " ") + " "
+        ghostty_surface_text(s, joined, UInt(joined.utf8.count))
+        return true
+    }
+
+    /// Paste an image from the clipboard by saving it as a PNG and injecting its path.
+    private func pasteImageFromClipboard() -> Bool {
+        guard let s = surface else { return false }
+        guard let image = NSImage(pasteboard: NSPasteboard.general),
+              let data = Self.pngData(from: image) else { return false }
+
+        do {
+            let url = try Self.writeClipboardImage(data)
+            let text = Self.shellEscape(url.path) + " "
+            ghostty_surface_text(s, text, UInt(text.utf8.count))
+            return true
+        } catch {
+            print("[GhosttyTerminalView] failed to save clipboard image: \(error)")
+            return false
+        }
+    }
+
+    private static func pngData(from image: NSImage) -> Data? {
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
+    }
+
+    private static func writeClipboardImage(_ data: Data) throws -> URL {
+        let fm = FileManager.default
+        let base = fm.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let dir = base.appendingPathComponent("mux0/PastedImages", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let millis = Int(Date().timeIntervalSince1970 * 1000)
+        let suffix = UUID().uuidString.prefix(8).lowercased()
+        let url = dir.appendingPathComponent("mux0-paste-\(millis)-\(suffix).png")
+        try data.write(to: url, options: .atomic)
+        return url
     }
 
     /// 为 shell 命令行安全注入一条路径做最小转义。全 "安全" 字符（字母数字与常见文件名标点）
