@@ -29,6 +29,12 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     /// mux0 用独立 surface + NSSplitView 自绘，需要我们自己在 view 层 apply alpha。
     private static var unfocusedOpacity: CGFloat = 1.0
 
+    /// 焦点恢复期间临时抑制 ghostty copy-on-select 的剪贴板写入。
+    /// 当 app 从后台激活导致 becomeFirstResponder 时设为 true，
+    /// ghostty_surface_set_focus 返回后立即清除。writeClipboardCallback
+    /// 检查此标志，为 true 时跳过剪贴板写入，避免覆盖用户在其他桌面复制的内容。
+    var suppressCopyOnFocusRestore = false
+
     /// The model-layer UUID this view represents. Set by TabContentView right after
     /// construction. Used by GhosttyBridge.actionCallback to route ghostty action
     /// callbacks (e.g. COMMAND_FINISHED) back to TerminalStatusStore.
@@ -323,7 +329,16 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     override var acceptsFirstResponder: Bool { true }
 
     override func becomeFirstResponder() -> Bool {
-        if let s = surface { ghostty_surface_set_focus(s, true) }
+        if let s = surface {
+            // 如果不是鼠标点击触发（即 app 激活恢复焦点），临时抑制
+            // ghostty copy-on-select 的剪贴板写入，防止旧选区覆盖剪贴板。
+            let isMouseDriven = NSApp.currentEvent.map {
+                $0.type == .leftMouseDown || $0.type == .rightMouseDown || $0.type == .otherMouseDown
+            } ?? false
+            if !isMouseDriven { suppressCopyOnFocusRestore = true }
+            ghostty_surface_set_focus(s, true)
+            suppressCopyOnFocusRestore = false
+        }
         return true
     }
 

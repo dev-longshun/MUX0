@@ -431,6 +431,12 @@ final class GhosttyBridge {
     private static let writeClipboardCallback: ghostty_runtime_write_clipboard_cb = { userdata, _, content, count, _ in
         guard let content = content, count > 0 else { return }
 
+        // 焦点恢复期间抑制 copy-on-select，防止旧选区覆盖用户在其他桌面复制的内容。
+        if let ud = userdata {
+            let view = Unmanaged<GhosttyTerminalView>.fromOpaque(ud).takeUnretainedValue()
+            if view.suppressCopyOnFocusRestore { return }
+        }
+
         // Ghostty hands us the selection as multiple MIME-tagged entries (typically
         // text/plain + text/html). The old implementation ignored `mime` and wrote
         // every entry as .string after clearing the pasteboard, so text/html was
