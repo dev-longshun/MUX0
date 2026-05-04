@@ -17,7 +17,7 @@ struct FontSectionView: View {
             BoundStepper(
                 settings: settings,
                 key: "font-size",
-                defaultValue: 13,
+                defaultValue: 15,
                 range: 6...72,
                 label: L10n.Settings.fontSize
             )

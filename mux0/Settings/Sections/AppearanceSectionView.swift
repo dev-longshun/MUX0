@@ -53,7 +53,7 @@ struct AppearanceSectionView: View {
             BoundStepper(
                 settings: settings,
                 key: "window-padding-x",
-                defaultValue: 4,
+                defaultValue: 16,
                 range: 0...100,
                 label: L10n.Settings.windowPaddingX
             )
@@ -61,7 +61,7 @@ struct AppearanceSectionView: View {
             BoundStepper(
                 settings: settings,
                 key: "window-padding-y",
-                defaultValue: 4,
+                defaultValue: 16,
                 range: 0...100,
                 label: L10n.Settings.windowPaddingY
             )
