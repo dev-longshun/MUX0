@@ -29,26 +29,6 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     /// mux0 用独立 surface + NSSplitView 自绘，需要我们自己在 view 层 apply alpha。
     private static var unfocusedOpacity: CGFloat = 1.0
 
-    /// 焦点恢复期间临时抑制 ghostty copy-on-select 的剪贴板写入。
-    /// 非鼠标触发的焦点恢复时设为 true，由下一次 mouseDown 或 300ms 超时清除。
-    /// writeClipboardCallback 检查此标志，为 true 时跳过剪贴板写入，
-    /// 避免覆盖用户在其他桌面复制的内容。
-    var suppressCopyOnFocusRestore = false
-
-    /// 延迟清除 suppressCopyOnFocusRestore 的 work item，mouseDown 提前清除时取消。
-    private var suppressClearWork: DispatchWorkItem?
-
-    /// 设置 suppress 标志并调度 300ms 后自动清除（兜底键盘交互等非鼠标场景）。
-    private func armSuppressCopyOnFocusRestore() {
-        suppressCopyOnFocusRestore = true
-        suppressClearWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.suppressCopyOnFocusRestore = false
-        }
-        suppressClearWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
-    }
-
     /// The model-layer UUID this view represents. Set by TabContentView right after
     /// construction. Used by GhosttyBridge.actionCallback to route ghostty action
     /// callbacks (e.g. COMMAND_FINISHED) back to TerminalStatusStore.
@@ -174,16 +154,10 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
         guard currentFrontmost !== front else { return }
         currentFrontmost = front
         let zeroMods = ghostty_input_mods_e(rawValue: 0)
-        // 非鼠标触发的焦点恢复（切桌面/切窗口回来）需要抑制 copy-on-select，
-        // 防止旧选区覆盖用户在其他地方复制的新内容。
-        let isMouseDriven = NSApp.currentEvent.map {
-            $0.type == .leftMouseDown || $0.type == .rightMouseDown || $0.type == .otherMouseDown
-        } ?? false
 
         for v in registry.allObjects {
             guard let s = v.surface else { continue }
             let isFront = (v === front)
-            if isFront && !isMouseDriven { v.armSuppressCopyOnFocusRestore() }
             ghostty_surface_set_focus(s, isFront)
             ghostty_surface_set_occlusion(s, !isFront)
             // 任何切换都对所有 surface 做一次 defensive RELEASE，
@@ -351,12 +325,6 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
 
     override func becomeFirstResponder() -> Bool {
         if let s = surface {
-            // 如果不是鼠标点击触发（即 app 激活恢复焦点），临时抑制
-            // ghostty copy-on-select 的剪贴板写入，防止旧选区覆盖剪贴板。
-            let isMouseDriven = NSApp.currentEvent.map {
-                $0.type == .leftMouseDown || $0.type == .rightMouseDown || $0.type == .otherMouseDown
-            } ?? false
-            if !isMouseDriven { armSuppressCopyOnFocusRestore() }
             ghostty_surface_set_focus(s, true)
         }
         return true
@@ -494,10 +462,9 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     // MARK: - Mouse input
 
     override func mouseDown(with event: NSEvent) {
-        // 用户主动点击，清除焦点恢复期间的 copy-on-select 抑制，
-        // 确保后续新选区的 copy-on-select 正常工作。
-        suppressClearWork?.cancel()
-        suppressCopyOnFocusRestore = false
+        // 用户主动点击，清除 copy-on-select 内容去重记录，
+        // 确保后续新选区（即使内容相同）的 copy-on-select 正常工作。
+        GhosttyBridge.resetCopyOnSelectDedup()
         // This view consumes the event before SplitPaneView sees it, so notify
         // the owner here so `focusedTerminalId` tracks the actual user focus.
         onFocus?()
@@ -527,8 +494,7 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        suppressClearWork?.cancel()
-        suppressCopyOnFocusRestore = false
+        GhosttyBridge.resetCopyOnSelectDedup()
         Self.releaseAllExcept(self)
         guard let s = surface else { return }
         let pt = flippedPoint(event.locationInWindow)

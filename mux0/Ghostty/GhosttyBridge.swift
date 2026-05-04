@@ -101,6 +101,8 @@ final class GhosttyBridge {
         cursor-style = bar
         cursor-style-blink = true
         cursor-color = #a277ff
+        selection-background = #3d375e
+        selection-foreground = #edecee
         window-padding-x = 16
         window-padding-y = 16
         """
@@ -438,12 +440,6 @@ final class GhosttyBridge {
     private static let writeClipboardCallback: ghostty_runtime_write_clipboard_cb = { userdata, _, content, count, _ in
         guard let content = content, count > 0 else { return }
 
-        // 焦点恢复期间抑制 copy-on-select，防止旧选区覆盖用户在其他桌面复制的内容。
-        if let ud = userdata {
-            let view = Unmanaged<GhosttyTerminalView>.fromOpaque(ud).takeUnretainedValue()
-            if view.suppressCopyOnFocusRestore { return }
-        }
-
         // Ghostty hands us the selection as multiple MIME-tagged entries (typically
         // text/plain + text/html). The old implementation ignored `mime` and wrote
         // every entry as .string after clearing the pasteboard, so text/html was
@@ -465,12 +461,22 @@ final class GhosttyBridge {
         }
         guard !items.isEmpty else { return }
 
+        // 内容去重：如果 ghostty 要写入的纯文本与上次写入完全相同，跳过本次写入。
+        // 这能彻底阻止焦点恢复时旧选区重复覆盖剪贴板（无论回调是同步、异步还是
+        // 由 draw 循环触发），同时不影响用户选择新文本。mouseDown 会清除
+        // lastWrittenText，确保用户主动重选相同文本时不被误拦。
+        let plainText = items.first(where: { $0.0 == .string })?.1
+        if let plainText, plainText == lastWrittenCopyOnSelectText {
+            return
+        }
+
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.declareTypes(items.map { $0.0 }, owner: nil)
         for (type, str) in items {
             pb.setString(str, forType: type)
         }
+        lastWrittenCopyOnSelectText = plainText
 
         // Post toast notification so the terminal pane can flash "Copied".
         // userdata is the owning GhosttyTerminalView (set in newSurface).
@@ -480,5 +486,14 @@ final class GhosttyBridge {
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: .mux0ClipboardWritten, object: view)
         }
+    }
+
+    /// 上次 copy-on-select 写入剪贴板的纯文本。用于内容去重，防止焦点恢复时
+    /// 旧选区重复覆盖剪贴板。mouseDown 时清除以允许用户主动重选相同文本。
+    static var lastWrittenCopyOnSelectText: String?
+
+    /// 由 GhosttyTerminalView.mouseDown 调用，清除去重记录。
+    static func resetCopyOnSelectDedup() {
+        lastWrittenCopyOnSelectText = nil
     }
 }
