@@ -7,16 +7,16 @@ final class CopiedToastView: NSView {
     private var hideTask: Task<Void, Never>?
 
     /// Total visible duration before fade-out begins.
-    private static let displayDuration: UInt64 = 1_500_000_000  // 1.5s
+    private static let displayDuration: UInt64 = 2_500_000_000  // 2.5s
     /// Fade-in / fade-out animation duration.
-    private static let fadeDuration: CFTimeInterval = 0.2
+    private static let fadeDuration: CFTimeInterval = 0.5
     /// Margin from the bottom-right corner of the superview.
     private static let margin: CGFloat = DT.Space.sm
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.cornerRadius = DT.Radius.chip
+        layer?.cornerRadius = DT.Radius.row
         alphaValue = 0
 
         label.font = DT.Font.small
@@ -42,11 +42,11 @@ final class CopiedToastView: NSView {
     func show(in parent: NSView, theme: AppTheme) {
         hideTask?.cancel()
 
-        // Theme-adaptive colours: dark bg + light text on dark themes, inverted for light.
-        layer?.backgroundColor = (theme.isDark
-            ? NSColor.white.withAlphaComponent(0.15)
-            : NSColor.black.withAlphaComponent(0.12)).cgColor
-        label.textColor = theme.textPrimary
+        // KAKU 风格：accent 紫色背景 + 白色文字
+        layer?.backgroundColor = theme.accent.withAlphaComponent(
+            theme.isDark ? 0.9 : 0.85
+        ).cgColor
+        label.textColor = .white
         label.stringValue = L10n.string("toast.copied")
 
         if superview !== parent {
