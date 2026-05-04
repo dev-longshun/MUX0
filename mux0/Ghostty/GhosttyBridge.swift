@@ -94,7 +94,12 @@ final class GhosttyBridge {
         // 也能覆盖（load_recursive_files 发生在本默认层之后）。
         let mux0Defaults = """
         font-family = JetBrains Mono
-        font-size = 15
+        font-codepoint-map = U+4E00-U+9FFF=LXGW WenKai Mono
+        font-codepoint-map = U+3400-U+4DBF=LXGW WenKai Mono
+        font-codepoint-map = U+3000-U+303F=LXGW WenKai Mono
+        font-codepoint-map = U+FF00-U+FFEF=LXGW WenKai Mono
+        font-codepoint-map = U+2E80-U+2EFF=LXGW WenKai Mono
+        font-size = 13
         adjust-cell-height = 4
         background = #15141b
         foreground = #edecee
