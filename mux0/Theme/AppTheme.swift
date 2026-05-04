@@ -40,11 +40,11 @@ extension AppTheme {
         systemIsDark: Bool
     ) -> AppTheme {
         let bg = background ?? (systemIsDark
-            ? NSColor(srgbRed: 0.07, green: 0.07, blue: 0.075, alpha: 1)
+            ? NSColor(srgbRed: 0.082, green: 0.078, blue: 0.106, alpha: 1)
             : NSColor(srgbRed: 0.985, green: 0.982, blue: 0.978, alpha: 1))
 
         let fg = foreground ?? (systemIsDark
-            ? NSColor(srgbRed: 0.92, green: 0.92, blue: 0.93, alpha: 1)
+            ? NSColor(srgbRed: 0.929, green: 0.925, blue: 0.933, alpha: 1)
             : NSColor(srgbRed: 0.10, green: 0.10, blue: 0.105, alpha: 1))
 
         let bgBrightness = bg.usingColorSpace(.sRGB)?.brightnessComponent ?? 0
@@ -63,7 +63,7 @@ extension AppTheme {
 
         // accent: ghostty palette 提供则用，否则回退到品牌 amber
         let accentColor = accent ?? (isDark
-            ? NSColor(srgbRed: 0.953, green: 0.659, blue: 0.196, alpha: 1)
+            ? NSColor(srgbRed: 0.635, green: 0.467, blue: 1.0, alpha: 1)
             : NSColor(srgbRed: 0.850, green: 0.450, blue: 0.050, alpha: 1))
         let accentMuted = accentColor.withAlphaComponent(0.10)
 

@@ -93,9 +93,15 @@ final class GhosttyBridge {
         // 用户在 GUI 打开开关会写 override 覆盖本行，用户自己的 ghostty config
         // 也能覆盖（load_recursive_files 发生在本默认层之后）。
         let mux0Defaults = """
+        font-family = JetBrains Mono
+        font-size = 13
+        background = #15141b
+        foreground = #edecee
+        cursor-style = bar
+        cursor-style-blink = true
+        cursor-color = #a277ff
         window-padding-x = 4
         window-padding-y = 4
-        cursor-style-blink = false
         """
         try? mux0Defaults.write(toFile: mux0DefaultsPath, atomically: true, encoding: .utf8)
         mux0DefaultsPath.withCString { ghostty_config_load_file(cfg, $0) }

@@ -76,7 +76,7 @@ struct AppearanceSectionView: View {
             BoundToggle(
                 settings: settings,
                 key: "cursor-style-blink",
-                defaultValue: false,
+                defaultValue: true,
                 label: L10n.Settings.cursorBlink
             )
 
