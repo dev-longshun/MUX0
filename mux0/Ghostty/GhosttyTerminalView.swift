@@ -160,10 +160,18 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
         guard currentFrontmost !== front else { return }
         currentFrontmost = front
         let zeroMods = ghostty_input_mods_e(rawValue: 0)
+        // 非鼠标触发的焦点恢复（切桌面/切窗口回来）需要抑制 copy-on-select，
+        // 防止旧选区覆盖用户在其他地方复制的新内容。
+        let isMouseDriven = NSApp.currentEvent.map {
+            $0.type == .leftMouseDown || $0.type == .rightMouseDown || $0.type == .otherMouseDown
+        } ?? false
+
         for v in registry.allObjects {
             guard let s = v.surface else { continue }
             let isFront = (v === front)
+            if isFront && !isMouseDriven { v.suppressCopyOnFocusRestore = true }
             ghostty_surface_set_focus(s, isFront)
+            if isFront { v.suppressCopyOnFocusRestore = false }
             ghostty_surface_set_occlusion(s, !isFront)
             // 任何切换都对所有 surface 做一次 defensive RELEASE，
             // 防止前一次交互留下未配对的 PRESS。RELEASE 不会影响 ghostty 已提交的选区，
