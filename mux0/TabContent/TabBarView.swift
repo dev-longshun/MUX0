@@ -347,6 +347,7 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
     private let titleLabel = NSTextField(labelWithString: "")
     private let renameField = NSTextField()
     private let statusIcon = TerminalStatusIconView(frame: .zero)
+    private let closeButton = NSButton()
     private var originalTitle: String = ""
     private var isRenaming: Bool = false
     private var isSelected: Bool
@@ -401,6 +402,16 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
         renameField.delegate = self
         renameField.isHidden = true
         addSubview(renameField)
+
+        closeButton.bezelStyle = .inline
+        closeButton.isBordered = false
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .medium))
+        closeButton.imagePosition = .imageOnly
+        closeButton.target = self
+        closeButton.action = #selector(closeTapped)
+        closeButton.isHidden = true
+        addSubview(closeButton)
     }
 
     override func updateTrackingAreas() {
@@ -429,10 +440,23 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
                 width: iconSize, height: iconSize)
         }
 
+        // Close button: 16x16, positioned to the right of text (before status icon if present)
+        let closeBtnSize: CGFloat = 16
+        let closeGap: CGFloat = 4
+        let closeX: CGFloat
+        if showStatusIndicators {
+            closeX = bounds.width - margin - iconSize - iconGap - closeBtnSize
+        } else {
+            closeX = bounds.width - margin - closeBtnSize
+        }
+        closeButton.frame = NSRect(x: closeX, y: (h - closeBtnSize) / 2,
+                                   width: closeBtnSize, height: closeBtnSize)
+        let closeReserve: CGFloat = (isHovered && canClose) ? closeBtnSize + closeGap : 0
+
         let textH = ceil(titleLabel.intrinsicContentSize.height)
         let textX = margin
         let textFrame = NSRect(x: textX, y: (h - textH) / 2,
-                               width: bounds.width - margin - iconSize - iconGap - textX,
+                               width: bounds.width - margin - iconSize - iconGap - closeReserve - textX,
                                height: textH)
         titleLabel.frame = textFrame
         renameField.frame = textFrame
@@ -534,7 +558,10 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
             pillView.layer?.backgroundColor = .clear
             titleLabel.textColor = theme.textSecondary
         }
+        closeButton.isHidden = !(isHovered && canClose)
+        closeButton.contentTintColor = theme.textSecondary
         needsDisplay = true
+        needsLayout = true
     }
 
 

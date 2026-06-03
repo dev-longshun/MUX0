@@ -108,14 +108,6 @@ struct SidebarView: View {
 
     private var footer: some View {
         HStack(spacing: DT.Space.xs) {
-            versionButton
-            if updateStore.hasUpdate {
-                Image(systemName: "circle.fill")
-                    .font(.system(size: 6))
-                    .foregroundColor(Color(theme.danger))
-                    .symbolEffect(.pulse)
-                    .help(String(localized: (L10n.Sidebar.updateAvailable).withLocale(locale)))
-            }
             Spacer()
             IconButton(theme: theme, help: String(localized: (L10n.Sidebar.settingsTooltip).withLocale(locale))) {
                 NotificationCenter.default.post(name: .mux0OpenSettings, object: nil)
@@ -134,22 +126,6 @@ struct SidebarView: View {
     /// 与 sidebar row 状态图标列对齐。图标中心距 sidebar 右 =
     /// outerHorizontalInset(8) + hPad(12) + iconSize/2(5) = 25；22pt 按钮右边距 = 25 - 11 = 14。
     fileprivate static let iconColumnButtonTrailing: CGFloat = 14
-
-    private var versionButton: some View {
-        Button {
-            NotificationCenter.default.post(
-                name: .mux0OpenSettings,
-                object: nil,
-                userInfo: ["section": "update"]
-            )
-        } label: {
-            Text("v\(updateStore.currentVersion)")
-                .font(Font(DT.Font.small))
-                .foregroundColor(Color(theme.textSecondary))
-        }
-        .buttonStyle(.plain)
-        .help(String(localized: (L10n.Sidebar.checkForUpdates).withLocale(locale)))
-    }
 
     // MARK: - Header
 

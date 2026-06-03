@@ -443,6 +443,7 @@ final class GhosttyBridge {
 
     // ghostty_runtime_write_clipboard_cb: (void*, ghostty_clipboard_e, const ghostty_clipboard_content_s*, size_t, bool) -> void
     private static let writeClipboardCallback: ghostty_runtime_write_clipboard_cb = { userdata, _, content, count, _ in
+        guard !suppressClipboardWrite else { return }
         guard let content = content, count > 0 else { return }
 
         // Ghostty hands us the selection as multiple MIME-tagged entries (typically
@@ -496,6 +497,12 @@ final class GhosttyBridge {
     /// 上次 copy-on-select 写入剪贴板的纯文本。用于内容去重，防止焦点恢复时
     /// 旧选区重复覆盖剪贴板。mouseDown 时清除以允许用户主动重选相同文本。
     static var lastWrittenCopyOnSelectText: String?
+
+    /// makeFrontmost 执行期间为 true，完全抑制 writeClipboardCallback 的剪贴板写入。
+    /// 焦点切换中的 set_focus / MOUSE_RELEASE / mouse_pos 调用可能触发 ghostty
+    /// 以异常内容（非原始选区）回调 write_clipboard，内容去重无法拦截这种"不同文本"
+    /// 的写入。此标志从根源阻止焦点切换期间的任何剪贴板副作用。
+    static var suppressClipboardWrite = false
 
     /// 由 GhosttyTerminalView.mouseDown 调用，清除去重记录。
     static func resetCopyOnSelectDedup() {

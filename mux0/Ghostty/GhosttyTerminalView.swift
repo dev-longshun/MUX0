@@ -155,6 +155,11 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
         currentFrontmost = front
         let zeroMods = ghostty_input_mods_e(rawValue: 0)
 
+        // 焦点切换期间完全抑制剪贴板写入。set_focus / MOUSE_RELEASE / mouse_pos
+        // 可能触发 ghostty 以异常内容回调 write_clipboard，覆盖用户真实剪贴板。
+        GhosttyBridge.suppressClipboardWrite = true
+        defer { GhosttyBridge.suppressClipboardWrite = false }
+
         for v in registry.allObjects {
             guard let s = v.surface else { continue }
             let isFront = (v === front)
