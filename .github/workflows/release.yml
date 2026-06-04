@@ -49,13 +49,61 @@ jobs:
       - name: Check landing-page version sync
         run: ./scripts/sync-landing-version.sh --check
 
+  build_libghostty:
+    name: Build libghostty (macos-15)
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    # zig 0.15.2 自带的 darwin libc tubs 与 macOS 26 SDK 的 libSystem.tbd
+    # 不兼容（compiler_rt 引用 __availability_version_check 等符号在新 SDK
+    # 上找不到，参考 zig issue #18818 / #25813）。macos-26 runner 又只装了
+    # macOS 26.x SDK，没有老 SDK 兜底，所以 zig 链接必挂。这里退到 macos-15
+    # runner（带 macOS 15 SDK）单独构建 libghostty，产物以 artifact 形式
+    # 传给主 build job。libghostty 是 static .a（universal arm64+x86_64），
+    # 跨 host OS 链接没问题。
+    # TODO(zig-unpin): 等上游 ghostty 适配 zig 0.16+ 后，删掉这个 job，把
+    # build libghostty 步骤合并回主 build job（详见下方 build job 注释）。
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build libghostty
+        run: ./scripts/build-vendor.sh
+
+      - name: Pack libghostty vendor
+        # actions/upload-artifact@v4 会把 path 的"least common ancestor"作为
+        # archive root，导致 path: Vendor/ghostty 上传的 archive 里只剩
+        # include/ lib/ share/ 子树（没有 Vendor/ghostty/ 前缀），下游 download
+        # 还原时容易落错位置。改成自己 tar 打包，路径布局 100% 可控。
+        run: |
+          ls -la Vendor/ghostty/lib Vendor/ghostty/include
+          tar -czvf /tmp/libghostty-vendor.tar.gz -C Vendor/ghostty .
+
+      - name: Upload libghostty vendor artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libghostty-vendor
+          path: /tmp/libghostty-vendor.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     name: Build, notarize, release
-    needs: check
+    needs: [check, build_libghostty]
     if: needs.check.outputs.should_release == 'true'
     # macos-26 ships Xcode 26 / macOS 26 SDK so SwiftUI controls render with
     # Liquid Glass on macOS 26 while still running on the deployment target
     # (macOS 14+) with automatic fallback.
+    # libghostty 在单独的 build_libghostty job (macos-15) 上构建后通过
+    # artifact 拿过来 —— 见上面那个 job 的注释。
     runs-on: macos-26
     env:
       VERSION: ${{ needs.check.outputs.version }}
@@ -73,16 +121,6 @@ jobs:
         run: |
           brew install xcodegen create-dmg git-cliff
           brew install --cask gh || true
-
-      # TODO(zig-unpin): 等上游 ghostty 适配 zig 0.16+ 后，移除这里的版本锁，
-      # 改回 `brew install zig`。当前 pin 到 0.15.2 是因为：
-      #   1. ghostty build.zig 的 requireZig 要求 v0.15.2
-      #   2. zig 0.16 的 Dir.readFileAlloc 从 3 参改成 4 参，导致 build.zig:27 编译失败
-      # 解锁时同步更新 scripts/build-vendor.sh 与 docs/build.md 里对 zig 版本的说明。
-      - name: Install Zig 0.15.2
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
 
       - name: Guard against unfilled Sparkle public key placeholder
         run: |
@@ -126,13 +164,24 @@ jobs:
 
           rm -f "$CERT_PATH"
 
-      - name: Build libghostty
-        run: ./scripts/build-vendor.sh
+      - name: Download libghostty vendor artifact
+        # 由上游 build_libghostty job 在 macos-15 上构建 — 见 job 头部注释。
+        # 上游用 tar 打包，路径布局可控；这里解包到 Vendor/ghostty/。
+        uses: actions/download-artifact@v4
+        with:
+          name: libghostty-vendor
+          path: /tmp
+
+      - name: Unpack libghostty vendor
+        run: |
+          mkdir -p Vendor/ghostty
+          tar -xzvf /tmp/libghostty-vendor.tar.gz -C Vendor/ghostty
+          ls -la Vendor/ghostty/lib Vendor/ghostty/include
 
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build Release (arm64) with Developer ID + Hardened Runtime
+      - name: Build Release (universal) with Developer ID + Hardened Runtime
         env:
           SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -141,7 +190,8 @@ jobs:
             -project mux0.xcodeproj \
             -scheme mux0 \
             -configuration Release \
-            -arch arm64 \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
             -derivedDataPath build \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
@@ -238,7 +288,7 @@ jobs:
       - name: Create DMG
         id: dmg
         run: |
-          DMG="mux0-${VERSION}-arm64.dmg"
+          DMG="mux0-${VERSION}-universal.dmg"
           create-dmg \
             --volname "mux0 ${VERSION}" \
             --window-size 520 320 \

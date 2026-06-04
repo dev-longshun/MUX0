@@ -5,6 +5,9 @@ struct TabBridge: NSViewRepresentable {
     @Bindable var store: WorkspaceStore
     @Bindable var statusStore: TerminalStatusStore
     @Bindable var pwdStore: TerminalPwdStore
+    @Bindable var sessionTitleStore: TerminalSessionTitleStore
+    @Bindable var settings: SettingsConfigStore
+    @Bindable var quickActionsStore: QuickActionsStore
     var theme: AppTheme
     /// ghostty `background-opacity`，用来给 AppKit layer 背景（canvas / sidebar strip）
     /// 加 alpha —— 不动 theme token 本身，避免派生出的 border/text 色也被乘透。
@@ -21,7 +24,11 @@ struct TabBridge: NSViewRepresentable {
     func makeNSView(context: Context) -> TabContentView {
         let view = TabContentView(frame: .zero)
         view.store = store
+        view.statusStore = statusStore
         view.pwdStore = pwdStore
+        view.sessionTitleStore = sessionTitleStore
+        view.settingsStore = settings
+        view.quickActionsStore = quickActionsStore
         view.applyTheme(theme, backgroundOpacity: backgroundOpacity, locale: locale)
         if let ws = store.selectedWorkspace {
             view.loadWorkspace(ws,
@@ -34,7 +41,11 @@ struct TabBridge: NSViewRepresentable {
     func updateNSView(_ nsView: TabContentView, context: Context) {
         _ = languageTick
         nsView.store = store
+        nsView.statusStore = statusStore
         nsView.pwdStore = pwdStore
+        nsView.sessionTitleStore = sessionTitleStore
+        nsView.settingsStore = settings
+        nsView.quickActionsStore = quickActionsStore
         nsView.applyTheme(theme, backgroundOpacity: backgroundOpacity, locale: locale)
         if let ws = store.selectedWorkspace {
             nsView.loadWorkspace(ws,

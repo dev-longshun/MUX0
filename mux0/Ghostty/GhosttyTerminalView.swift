@@ -5,6 +5,17 @@ import QuartzCore
 final class GhosttyTerminalView: NSView, NSTextInputClient {
     private var surface: ghostty_surface_t?
     private var displayLink: CVDisplayLink?
+    private var backingObserver: NSObjectProtocol?
+
+    /// While set and in the future, this (otherwise non-frontmost) surface is
+    /// drawn by the displayLink so it can repaint after a size change — ghostty
+    /// needs several frames to reflow, which a single manual draw can't provide.
+    /// Cleared (and the surface re-occluded) by the displayLink once it lapses.
+    /// See `setFrameSize`. Touched only on the main queue.
+    private var redrawBurstDeadline: Date?
+    /// How long a post-resize redraw burst lasts. Generous enough to cover
+    /// ghostty's grid reflow; a one-time cost paid only on actual size changes.
+    private static let burstSeconds: TimeInterval = 0.4
 
     // MARK: NSTextInputClient state
     /// 本轮 keyDown 中由 `insertText` 收集到的已提交文本。随 keyDown 开始清空、结束读取。
@@ -34,9 +45,9 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     /// callbacks (e.g. COMMAND_FINISHED) back to TerminalStatusStore.
     var terminalId: UUID?
 
-    /// The workspace-level default command to type into the initial shell when this
-    /// surface is created. Set by TabContentView before the view enters a window.
-    /// Only used on first surface creation (viewDidMoveToWindow when surface == nil).
+    /// Shell command to auto-execute on first surface creation. Set by
+    /// TabContentView before the view enters a window; consumed once when
+    /// `surface == nil` in `viewDidMoveToWindow`.
     var command: String?
 
     // MARK: - Scrollbar state (consumed by SurfaceScrollView)
@@ -100,6 +111,12 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     /// SplitPaneView's `mouseDown` because this view consumes the event first.
     var onFocus: (() -> Void)?
 
+    /// Injected by TabContentView. Fired on direct user activity in this pane
+    /// (mouseDown / keyDown). Used to mark the per-terminal agent status as
+    /// read — same effect tab/workspace switching has, but per-pane and driven
+    /// by interaction rather than navigation.
+    var onUserActivity: (() -> Void)?
+
     /// Map from the opaque ghostty_surface_t pointer back to the owning view.
     /// The action callback only has a ghostty_target_s with the surface handle; this
     /// lookup is how we get back to Swift-land. Weak references so a freed surface
@@ -147,18 +164,34 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
 
     /// 切换前台 terminal。
     /// - 把 `front` 设为唯一允许 draw / 接收事件的 surface
-    /// - 其它 surface: focus=false, occlusion=true, RELEASE 按键, 光标 park 到屏外
+    /// - 其它 surface: focus=false, visible=false, RELEASE 按键, 光标 park 到屏外
     /// - 不再发 click cycle（之前的 click cycle 反而在 ghostty 里建立了 selection anchor，
     ///   配合 ghostty 的 mouseLocation 轮询正好造成"鼠标飘到哪选到哪"）
     static func makeFrontmost(_ front: GhosttyTerminalView?) {
         guard currentFrontmost !== front else { return }
         currentFrontmost = front
         let zeroMods = ghostty_input_mods_e(rawValue: 0)
+        // Suppress clipboard writes: switching tabs/workspaces calls
+        // ghostty_surface_set_focus etc. which may trigger ghostty to sync
+        // the current selection into the system clipboard. Setting this flag
+        // prevents writeClipboardCallback from touching NSPasteboard.general
+        // during the transition. The ghostty C API calls below are synchronous,
+        // so any clipboard callbacks fire before we clear the flag.
+        GhosttyBridge.suppressClipboardWrites = true
+        defer { GhosttyBridge.suppressClipboardWrites = false }
         for v in registry.allObjects {
             guard let s = v.surface else { continue }
             let isFront = (v === front)
             ghostty_surface_set_focus(s, isFront)
-            ghostty_surface_set_occlusion(s, !isFront)
+            // 函数名是 `set_occlusion` 但 ghostty C 形参的语义是 `visible` —— true
+            // 表示"surface 可见,内部 displayLink 跑、render thread 推帧"; false 表示
+            // "被遮挡,停 displayLink 省 GPU"（见上游 src/Surface.zig
+            // occlusionCallback 注释 + src/renderer/generic.zig setVisible）。
+            // mux0 早期照着函数名按 occluded 语义传 `!isFront`，结果"前台"被告知
+            // visible=false 而停渲染,"非前台"反而 visible=true 在 vsync —— 表现就是
+            // v0.5.0 release 上"必须切 tab 才出内容,切完打字又卡"的 bug。
+            // 这里按 ghostty 现在的契约: 前台 visible=true,非前台 visible=false。
+            ghostty_surface_set_occlusion(s, isFront)
             // 任何切换都对所有 surface 做一次 defensive RELEASE，
             // 防止前一次交互留下未配对的 PRESS。RELEASE 不会影响 ghostty 已提交的选区，
             // 仅清理 button 状态，所以是安全的。
@@ -233,6 +266,7 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
         // is kept alive (we only free it in deinit) so shell state is preserved.
         guard window != nil else {
             stopDisplayLink()
+            removeBackingObserver()
             return
         }
         if surface == nil {
@@ -248,22 +282,72 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
             )
             if let s = surface {
                 GhosttyTerminalView.viewBySurface[OpaquePointer(s)] = Weak(self)   // NEW
-                let w = UInt32(bounds.width * scale)
-                let h = UInt32(bounds.height * scale)
-                ghostty_surface_set_size(s, w, h)
-                ghostty_surface_set_content_scale(s, scale, scale)
             }
         }
+        syncSurfaceGeometry(to: bounds.size)
         // Only start a display link if none is running. Without this guard every
         // re-parent would leak a CVDisplayLink (old one keeps firing), racing with
         // the new one and interleaving draws on the same surface.
         if displayLink == nil {
             startDisplayLink()
         }
+        // Re-sync scale when backing properties change (e.g. display sleep/wake or
+        // moving the window between Retina and non-Retina screens). Without this,
+        // a temporary backingScaleFactor drop during display transition permanently
+        // corrupts the ghostty surface scale.
+        installBackingObserver()
+    }
+
+    // MARK: - Backing scale sync
+
+    private func installBackingObserver() {
+        removeBackingObserver()
+        guard let window else { return }
+        backingObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeBackingPropertiesNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.syncSurfaceGeometry(to: self.bounds.size)
+        }
+    }
+
+    private func removeBackingObserver() {
+        if let obs = backingObserver {
+            NotificationCenter.default.removeObserver(obs)
+            backingObserver = nil
+        }
+    }
+
+    private func syncSurfaceGeometry(to pointSize: NSSize) {
+        guard let s = surface else { return }
+        guard pointSize.width > 0, pointSize.height > 0 else { return }
+        let scale = window?.backingScaleFactor ?? 2.0
+        let w = UInt32(pointSize.width * scale)
+        let h = UInt32(pointSize.height * scale)
+        guard w > 0, h > 0 else { return }
+        // Pin the layer's contentsScale to the window's backingScaleFactor so the
+        // Core Animation compositor doesn't apply its own scale on top of ghostty's
+        // already-px-correct render. Without this, dragging the window between a
+        // Retina (2x) and non-Retina (1x) screen leaves the compositor scaling the
+        // CAMetalLayer asymmetrically; the next layout pass (e.g. the first scroll
+        // re-pinning terminalView frame) then renders into the upper-left quadrant.
+        // Wrap in CATransaction with disabled actions so the change doesn't animate.
+        // Mirrors upstream ghostty/macos SurfaceView_AppKit.viewDidChangeBackingProperties.
+        if let window {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer?.contentsScale = window.backingScaleFactor
+            CATransaction.commit()
+        }
+        ghostty_surface_set_size(s, w, h)
+        ghostty_surface_set_content_scale(s, scale, scale)
     }
 
     deinit {
         stopDisplayLink()
+        removeBackingObserver()
         if let s = surface {
             GhosttyTerminalView.viewBySurface.removeValue(forKey: OpaquePointer(s))
             ghostty_surface_free(s)
@@ -282,11 +366,27 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
             let retained = Unmanaged.passRetained(view)
             DispatchQueue.main.async {
                 let v = retained.takeRetainedValue()
-                // 关键：只有当前前台 surface 才 draw。
+                guard let s = v.surface else { return }
+                let isFront = GhosttyTerminalView.currentFrontmost === v
+                // A non-frontmost pane draws only during its post-resize redraw
+                // burst (see setFrameSize). When the burst window closes, re-occlude
+                // it so we go back to the steady state of "only the frontmost pane
+                // renders" — the gate that kills ghostty's mouseLocation-driven
+                // "selection follows the mouse" loop for background panes.
+                var burst = false
+                if let deadline = v.redrawBurstDeadline {
+                    if Date() < deadline {
+                        burst = true
+                    } else {
+                        v.redrawBurstDeadline = nil
+                        if !isFront { ghostty_surface_set_occlusion(s, false) }
+                    }
+                }
+                // 关键：稳态下只有当前前台 surface 才 draw。
                 // libghostty 在 draw 内部会 +[NSEvent mouseLocation] 主动读全局光标，
                 // 不让它 draw 就不让它读，从根源切断"鼠标飘到哪选到哪"的循环。
-                guard GhosttyTerminalView.currentFrontmost === v else { return }
-                if let s = v.surface { ghostty_surface_draw(s) }
+                guard isFront || burst else { return }
+                ghostty_surface_draw(s)
             }
             return kCVReturnSuccess
         }, Unmanaged.passUnretained(self).toOpaque())
@@ -303,19 +403,41 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
     // MARK: - Layout
 
     override func setFrameSize(_ newSize: NSSize) {
+        let oldSize = frame.size
         super.setFrameSize(newSize)
-        guard let s = surface else { return }
         // Ignore transient zero-sized frames. These happen when the enclosing
         // SplitPaneView is being swapped out and briefly leaves subviews at .zero
         // before layout propagates the real size. Forwarding a (0, 0) size to
         // ghostty tears down its Metal renderer and the surface comes back blank
         // (black screen) even after the real size arrives on the next pass.
-        guard newSize.width > 0, newSize.height > 0 else { return }
-        let scale = window?.backingScaleFactor ?? 2.0
-        let w = UInt32(newSize.width * scale)
-        let h = UInt32(newSize.height * scale)
-        ghostty_surface_set_size(s, w, h)
-        ghostty_surface_set_content_scale(s, scale, scale)
+        syncSurfaceGeometry(to: newSize)
+        // A non-frontmost surface is excluded from the displayLink draw branch
+        // (the callback's `currentFrontmost === self` guard) AND was told
+        // set_occlusion(false) by makeFrontmost, so ghostty stops rendering it.
+        // After a real size change it would therefore keep presenting its
+        // pre-resize frame until the user clicks to refocus the pane. Typical
+        // trigger: ⌘D split shifts focus to the new pane, leaving the original
+        // non-frontmost with a fresh surface size but a stale on-screen frame.
+        //
+        // A single manual draw is NOT enough: ghostty's renderer needs several
+        // frames after a resize to reflow the grid and settle, so one frame
+        // paints a half-finished result. Instead we open a short "redraw burst":
+        // mark the surface visible again and let the already-running displayLink
+        // feed it frames for `burstSeconds`, exactly like a frontmost pane, then
+        // re-occlude. Safe vs. the mouseLocation-polling concern behind the
+        // frontmost-only gate — makeFrontmost has released every mouse button
+        // and parked the cursor at (-1, -1) for non-frontmost surfaces, so the
+        // burst can only ever render a transient hover, never a selection.
+        if oldSize != newSize, newSize.width > 0, newSize.height > 0,
+           let s = surface, Self.currentFrontmost !== self {
+            ghostty_surface_set_occlusion(s, true)
+            redrawBurstDeadline = Date().addingTimeInterval(Self.burstSeconds)
+        }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        syncSurfaceGeometry(to: bounds.size)
     }
 
     // MARK: - Focus
@@ -368,12 +490,41 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
 
     /// Select the entire scrollback contents.
     @discardableResult
-    func selectAll() -> Bool { runBindingAction("select_all") }
+    func selectAllRows() -> Bool { runBindingAction("select_all") }
+
+    // MARK: - Standard Edit-menu actions (responder chain entry points)
+    //
+    // mux0App 的 Edit > Copy/Paste/Select All 用 NSApp.sendAction(:to:nil) 沿
+    // responder chain 派发标准 selector。当终端是 first responder 时这三个
+    // 入口会被 AppKit 命中——把动作转发给 ghostty binding action，行为与之前
+    // 直接 post 通知的版本等价。
+    //
+    // 为什么不直接复用 `copySelection()` / `pasteClipboard()` 的名字：让方法名
+    // 区分 "selector 入口" 与 "纯函数实现"，避免别处误以为 `paste(_:)` 是
+    // 内部 API；同时可以在不破坏 binding-action 接口的前提下给 selector 单独
+    // 加 validation / logging。
+    //
+    // selectAll 必须用 `override`：NSResponder 已经声明了 `selectAll(_:)`，默认
+    // 实现会 forward 到下一个 responder 或 beep。ghostty 的滚动回放选择走的是
+    // binding action `select_all`，与 NSText 的"选中全部"语义一致。
+
+    @objc func paste(_ sender: Any?) {
+        _ = pasteClipboard()
+    }
+
+    @objc func copy(_ sender: Any?) {
+        _ = copySelection()
+    }
+
+    @objc override func selectAll(_ sender: Any?) {
+        _ = selectAllRows()
+    }
 
     // MARK: - Keyboard input
 
     override func keyDown(with event: NSEvent) {
         guard let s = surface else { super.keyDown(with: event); return }
+        onUserActivity?()
 
         // 这是 ghostty macOS 上游采用的"先走 NSTextInputClient、再单次交付给 ghostty"协议：
         //
@@ -428,6 +579,7 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
 
         if !committedText.isEmpty {
             committedText.withCString { send($0) }
+            postAccessibilityValueChanged()
         } else {
             send(nil)
         }
@@ -462,6 +614,7 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
         // This view consumes the event before SplitPaneView sees it, so notify
         // the owner here so `focusedTerminalId` tracks the actual user focus.
         onFocus?()
+        onUserActivity?()
         Self.makeFrontmost(self)
         window?.makeFirstResponder(self)
         guard let s = surface else { return }
@@ -786,6 +939,7 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
             // IME 面板在非 keyDown 上下文里直接提交（例如鼠标点击候选词）。
             guard let s = surface else { return }
             ghostty_surface_text(s, text, UInt(text.utf8.count))
+            postAccessibilityValueChanged()
         }
     }
 
@@ -869,5 +1023,34 @@ final class GhosttyTerminalView: NSView, NSTextInputClient {
 
     func characterIndex(for point: NSPoint) -> Int {
         NSNotFound
+    }
+
+    // MARK: - NSAccessibility
+    //
+    // 让 typeless / TextExpander / VoiceOver 之类基于辅助功能 API 的工具把
+    // 我们识别成"文本输入区"。否则 NSView 默认 role 是 .group，第三方工具
+    // 探测到非文本控件就会拒绝输入或在写完之后等不到 valueChanged 通知，
+    // 表现为"文字进了但工具自己报错说粘贴失败"。
+    //
+    // 注意：accessibilityValue 故意返回空串而不是 scrollback 内容——
+    //   1. scrollback 可能数百万字符，AX 缓存会爆
+    //   2. 第三方输入工具只关心"set 前后 value 字段是否变化 + 是否收到通知"，
+    //      不关心实际内容
+    //   3. 真正给 VoiceOver 朗读终端内容是另一个量级的工程，需要接 ghostty
+    //      的 selection / cursor API，超出本次修复范围
+
+    override func isAccessibilityElement() -> Bool { true }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
+
+    override func accessibilityLabel() -> String? { "Terminal" }
+
+    override func accessibilityValue() -> Any? { "" }
+
+    /// Post a `valueChanged` accessibility notification. Called after any user-driven
+    /// text actually reaches ghostty (insertText / keyDown's committed-text branch),
+    /// so AX-aware input tools know the write succeeded.
+    private func postAccessibilityValueChanged() {
+        NSAccessibility.post(element: self, notification: .valueChanged)
     }
 }

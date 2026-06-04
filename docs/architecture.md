@@ -9,7 +9,7 @@ mux0 是 SwiftUI 侧边栏 + AppKit 标签页 / 分割窗格混合架构。两�
 ```
 mux0.app
 ├── Sidebar (SwiftUI 壳 + AppKit 列表)  — workspace 列表，元信息展示
-│   └── SidebarView (SwiftUI: header / footer / alert / 通知 / refresher)
+│   └── SidebarView (SwiftUI: footer / alert / 通知 / refresher)
 │       └── SidebarListBridge (NSViewRepresentable)
 │           └── WorkspaceListView (NSView)
 │               └── WorkspaceRowItemView[] (private NSView)
@@ -179,6 +179,22 @@ Tab + SplitPane 全部用 AppKit，原因：NSSplitView 的 divider 拖拽、z-o
 - `SplitPaneView` — 递归构建 `NSSplitView`，叶子是 `SurfaceScrollView`（包装 `GhosttyTerminalView`）。结构变化触发 rebuild；仅 ratio 变化只调 `setPosition(_:ofDividerAt:)`（见 `SplitNode.sameStructure` 注释）
 - `SurfaceScrollView` — `NSScrollView` + 空白 `documentView`，`GhosttyTerminalView` 作为 documentView 子视图并 pin 在 `visibleRect` 上。消费 ghostty 的 `SCROLLBAR`（total/offset/len 行数）与 `CELL_SIZE`（backing px → pt）action 驱动 scroller；用户拖拽时转成行号并通过 `scroll_to_row:N` binding action 回写 ghostty。永远 overlay 样式以避免非 overlay 滚动条变宽引起的 PTY reflow
 - `GhosttyTerminalView` — 持有 `ghostty_surface_t`，Metal CALayer 渲染；失焦时整体降 alpha 到 `unfocused-split-opacity`
+
+### Quick Actions
+
+WorkspaceStore 的每个 Tab 可关联一个**快捷操作 ID**（`TerminalTab.quickActionId: String?`），由顶栏的 Quick Actions Bar（`ContentView.quickActionsBar`）按 `QuickActionsStore.displayList` 顺序渲染按钮触发：点击 → `WorkspaceStore.addQuickActionTab(id:title:in:)` 在当前 workspace 始终新建一个带该 quickActionId 的 tab，并通过 `TerminalPwdStore.inherit(from:to:)` 继承前一个焦点 pane 的 pwd（让 `gitui` 等命令落地在用户当下浏览的 cwd）。
+
+**每点一次都新建。** 顶栏快捷按钮是"新建快捷 tab"而非"切到那个 tab"，每次点击都起一个全新会话。同一 workspace 内可以同时存在多个相同 quickActionId 的 tab。
+
+**`QuickActionsStore`** 是 enabled 列表（按显示顺序排）+ 内置命令覆盖（per-id）+ 自定义条目数组的单一真理源，全部通过 `SettingsConfigStore` 持久化（3 个键：`mux0-quickactions-enabled` / `mux0-quickactions-builtin-command-<id>` / `mux0-quickactions-custom`）。`@Observable`，UI 直接订阅。
+
+**命令注入路径：** Tab 第一个终端启动时（`id == tab.layout.allTerminalIds().first`），`TabContentView.resolvedStartupCommand(forTerminal:)` 委托给 `StartupCommandResolver.resolve` 检测 `tab.quickActionId` 非空 → 调 `quickActionsStore.command(for: id)`：内置 = override 或默认（`gitui` / `claude` / `codex` / `opencode`），自定义 = 用户输入命令。返回值作为 `initial_input` + `\n` 喂给 ghostty surface，shell 启动后立即执行。Split 出的次级 pane 不会再跑（它不是 layout 第一个终端）。例外：若 `quickActionId` 是 builtin agent（claude / codex / opencode）、对应 Resume toggle 为 ON、且 `pendingPrefills[terminalId]` 是匹配 agent 的 `<agent> --resume <id>`，则注入该 prefill 而**非** `quickActionsStore.command(...)` —— 用户对 builtin 命令的 override 在 resume 路径下被故意绕过，恢复 session 比保留 flag 更优先。详见 `StartupCommandResolver.resolve` 的 (0a) 分支与 `docs/agent-hooks.md` 的 Resume command 持久化章节。
+
+**重启恢复：** Tab 数据序列化到 UserDefaults，重启后 `tab.quickActionId` 还在 → 同一注入路径自动重新跑命令（gitui 重新打开；claude / codex / opencode 在 Resume toggle 开启且有匹配 prefill 时改注入 `<agent> --resume <id>` 续接上一会话，否则跑默认命令）。Surface 不序列化，重启后是新 ghostty surface。
+
+**图标：** `BuiltinQuickAction.iconSource` 三种来源——SF Symbol（gitui 用 `arrow.triangle.branch`）、Asset Catalog（claude / codex / opencode 用 lobe-icons SVG，`template-rendering-intent: template`）、首字母（自定义）。三种统一通过 `QuickActionIconView` 渲染，跟随 theme token tint。
+
+**Settings：** `Settings → Quick Actions` 提供单一可拖拽列表，所有 4 内置 + N 自定义混排，每行可独立 toggle 启用 / 改命令；自定义可改名 / 删除。详见 `docs/superpowers/specs/2026-04-30-quick-actions.md`。
 
 ## Settings Layer
 

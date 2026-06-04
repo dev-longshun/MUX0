@@ -69,9 +69,37 @@ final class HookMessageTests: XCTestCase {
         XCTAssertFalse(raws.contains("shell"))
     }
 
+    func testDecodeRunningWithResumeCommand() throws {
+        let json = #"{"terminalId":"550E8400-E29B-41D4-A716-446655440000","event":"running","agent":"claude","at":1713500000.0,"resumeCommand":"claude --resume abc-123"}"#.data(using: .utf8)!
+        let msg = try JSONDecoder().decode(HookMessage.self, from: json)
+        XCTAssertEqual(msg.resumeCommand, "claude --resume abc-123")
+    }
+
+    func testDecodeRunningWithoutResumeCommand() throws {
+        let json = #"{"terminalId":"550E8400-E29B-41D4-A716-446655440000","event":"running","agent":"claude","at":1}"#.data(using: .utf8)!
+        let msg = try JSONDecoder().decode(HookMessage.self, from: json)
+        XCTAssertNil(msg.resumeCommand)
+    }
+
     func testAgentSettingsKeyFormat() {
         XCTAssertEqual(HookMessage.Agent.claude.settingsKey,   "mux0-agent-status-claude")
         XCTAssertEqual(HookMessage.Agent.codex.settingsKey,    "mux0-agent-status-codex")
         XCTAssertEqual(HookMessage.Agent.opencode.settingsKey, "mux0-agent-status-opencode")
+    }
+
+    func testDecodesSessionTitle() throws {
+        let json = #"""
+        {"terminalId":"\#(UUID().uuidString)","event":"running","agent":"claude","at":1.0,"sessionTitle":"Implement auto-naming"}
+        """#
+        let msg = try JSONDecoder().decode(HookMessage.self, from: Data(json.utf8))
+        XCTAssertEqual(msg.sessionTitle, "Implement auto-naming")
+    }
+
+    func testSessionTitleMissingIsNil() throws {
+        let json = #"""
+        {"terminalId":"\#(UUID().uuidString)","event":"running","agent":"claude","at":1.0}
+        """#
+        let msg = try JSONDecoder().decode(HookMessage.self, from: Data(json.utf8))
+        XCTAssertNil(msg.sessionTitle)
     }
 }

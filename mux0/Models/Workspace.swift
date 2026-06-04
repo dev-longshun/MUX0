@@ -130,12 +130,70 @@ struct TerminalTab: Codable, Identifiable, Equatable {
     var title: String
     var layout: SplitNode
     var focusedTerminalId: UUID
+    /// Quick Action binding for this tab. nil = ordinary terminal tab.
+    /// Non-nil values match either a `BuiltinQuickAction.id` (e.g.
+    /// `"gitui"`, `"claude"`) or a custom action's UUID. When the tab's
+    /// first terminal opens, `TabContentView.resolvedStartupCommand` resolves
+    /// this id via `QuickActionsStore.command(for:)` and injects the result
+    /// as the surface's initial_input.
+    var quickActionId: String? = nil
+    /// True once the user has manually renamed this tab (inline rename UI).
+    /// When true, `displayTitle` returns `title` unconditionally — auto
+    /// session titles from `TerminalSessionTitleStore` are ignored. Reset
+    /// via `WorkspaceStore.resetTabToAutoTitle` (right-click → "Reset to
+    /// auto title"). Defaults to false; old persisted data without this
+    /// field decodes as false (legacy tabs re-enter auto mode).
+    var userRenamed: Bool = false
 
-    init(id: UUID = UUID(), title: String, terminalId: UUID = UUID()) {
+    init(id: UUID = UUID(), title: String, terminalId: UUID = UUID(),
+         quickActionId: String? = nil, userRenamed: Bool = false) {
         self.id = id
         self.title = title
         self.layout = .terminal(terminalId)
         self.focusedTerminalId = terminalId
+        self.quickActionId = quickActionId
+        self.userRenamed = userRenamed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, layout, focusedTerminalId, quickActionId, userRenamed
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.title = try c.decode(String.self, forKey: .title)
+        self.layout = try c.decode(SplitNode.self, forKey: .layout)
+        self.focusedTerminalId = try c.decode(UUID.self, forKey: .focusedTerminalId)
+        self.quickActionId = try c.decodeIfPresent(String.self, forKey: .quickActionId)
+        self.userRenamed = try c.decodeIfPresent(Bool.self, forKey: .userRenamed) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encode(layout, forKey: .layout)
+        try c.encode(focusedTerminalId, forKey: .focusedTerminalId)
+        try c.encodeIfPresent(quickActionId, forKey: .quickActionId)
+        try c.encode(userRenamed, forKey: .userRenamed)
+    }
+
+    /// Resolve the title shown in the tab bar. Priority:
+    /// 1. User manually renamed → `title` (hard lock, ignores store)
+    /// 2. `sessionTitleStore[focusedTerminalId]` is non-nil → that
+    /// 3. Fallback → `title` (creation-time default like "Terminal 1" /
+    ///    quick action displayName)
+    ///
+    /// Tracks the focused pane, so split tabs switch label as the user
+    /// moves focus between panes. Shell pane (no agent session) falls
+    /// through to step 3 rather than retaining the previous agent pane's title.
+    func displayTitle(sessionTitleStore: TerminalSessionTitleStore) -> String {
+        if userRenamed { return title }
+        if let auto = sessionTitleStore.title(for: focusedTerminalId), !auto.isEmpty {
+            return auto
+        }
+        return title
     }
 }
 
@@ -147,6 +205,12 @@ struct Workspace: Codable, Identifiable, Equatable {
     var tabs: [TerminalTab]
     var selectedTabId: UUID?
     var defaultCommand: String?
+    /// Per-terminal one-shot command (key = terminalId.uuidString) to inject
+    /// as the next surface's `initial_input`. Persisted synchronously on
+    /// each agent `resumeCommand` so the latest session id survives
+    /// ⌘Q / force-quit / crash without relying on `willTerminate`.
+    /// Non-destructive read; overwritten only by the next prompt.
+    var pendingPrefills: [String: String] = [:]
 
     init(id: UUID = UUID(), name: String, defaultCommand: String? = nil) {
         self.id = id
@@ -159,9 +223,35 @@ struct Workspace: Codable, Identifiable, Equatable {
     var selectedTab: TerminalTab? {
         tabs.first { $0.id == selectedTabId }
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, tabs, selectedTabId, defaultCommand, pendingPrefills
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.tabs = try c.decode([TerminalTab].self, forKey: .tabs)
+        self.selectedTabId = try c.decodeIfPresent(UUID.self, forKey: .selectedTabId)
+        self.defaultCommand = try c.decodeIfPresent(String.self, forKey: .defaultCommand)
+        self.pendingPrefills = (try? c.decode([String: String].self, forKey: .pendingPrefills)) ?? [:]
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(tabs, forKey: .tabs)
+        try c.encodeIfPresent(selectedTabId, forKey: .selectedTabId)
+        try c.encodeIfPresent(defaultCommand, forKey: .defaultCommand)
+        try c.encode(pendingPrefills, forKey: .pendingPrefills)
+    }
 }
 
 enum WorkspaceDefaultCommand {
+    /// Build the auto-executing `initial_input` payload for a new ghostty
+    /// surface. Trailing `\n` makes the shell run it immediately.
     static func startupInput(for command: String?) -> String? {
         let trimmed = command?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let trimmed, !trimmed.isEmpty else { return nil }

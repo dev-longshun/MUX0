@@ -12,6 +12,7 @@ final class TabBarView: NSView {
     /// (fromIndex, toIndex) 采用 insertion-index 语义（0…count），
     /// 与 `WorkspaceStore.moveTab(fromIndex:toIndex:in:)` 对齐
     var onReorderTab: ((Int, Int) -> Void)?
+    var onResetAutoTitle: ((UUID) -> Void)?
     /// 若 tab 总数 ≤ 1，TabItemView 禁用 × 按钮与菜单 Close 项
     private var canClose: Bool { tabs.count > 1 }
 
@@ -34,7 +35,18 @@ final class TabBarView: NSView {
     private var tabs: [TerminalTab] = []
     private var selectedTabId: UUID?
     private var statuses: [UUID: TerminalStatus] = [:]
+    private var sessionTitles: [UUID: String] = [:]
     private var showStatusIndicators: Bool = false
+    /// Source for tab pill icon rendering (Quick Action ids → SF Symbol /
+    /// asset / letter). TabContentView wires this in via setter; TabItemView
+    /// reads it through a weak ref so the view never outlives its container.
+    weak var quickActionsStore: QuickActionsStore? {
+        didSet {
+            tabsContainer.subviews
+                .compactMap { $0 as? TabItemView }
+                .forEach { $0.quickActionsStore = quickActionsStore }
+        }
+    }
     /// Current locale forwarded from LanguageStore via TabContentView → TabBridge.
     /// Used to resolve LocalizedStringResource in makeAddButton() so the "+" tooltip
     /// tracks the user's in-app language choice rather than Locale.current.
@@ -98,16 +110,29 @@ final class TabBarView: NSView {
                 selectedTabId: UUID?,
                 theme: AppTheme,
                 statuses: [UUID: TerminalStatus] = [:],
+                sessionTitles: [UUID: String] = [:],
                 backgroundOpacity: CGFloat = 1.0,
                 showStatusIndicators: Bool = false) {
         self.tabs = tabs
         self.selectedTabId = selectedTabId
         self.theme = theme
         self.statuses = statuses
+        self.sessionTitles = sessionTitles
         self.backgroundOpacity = backgroundOpacity
         self.showStatusIndicators = showStatusIndicators
         rebuildTabItems()   // tab items are already initialised with correct theme
         applyTheme(theme, backgroundOpacity: backgroundOpacity)   // re-apply theme to non-tab elements (layer bg, addButton tint)
+    }
+
+    /// Display title with same 3-step priority as `TerminalTab.displayTitle(store:)`,
+    /// but reads from the snapshot dictionary we receive in `update`. Kept inline
+    /// so the AppKit view doesn't need to hold a store reference.
+    private func displayTitle(for tab: TerminalTab) -> String {
+        if tab.userRenamed { return tab.title }
+        if let auto = sessionTitles[tab.focusedTerminalId], !auto.isEmpty {
+            return auto
+        }
+        return tab.title
     }
 
     /// 复用现有 TabItemView——仅在 tabs 的 id 序列变化时才完整重建。
@@ -130,7 +155,10 @@ final class TabBarView: NSView {
                     let tabStatus = TerminalStatus.aggregate(
                         tab.layout.allTerminalIds().map { statuses[$0] ?? .neverRan }
                     )
-                    item.refresh(tab: tab, isSelected: isSel, theme: theme, canClose: canCloseNow, status: tabStatus, backgroundOpacity: backgroundOpacity, showStatusIndicators: showStatusIndicators)
+                    item.refresh(tab: tab, isSelected: isSel, theme: theme, canClose: canCloseNow,
+                                 status: tabStatus, backgroundOpacity: backgroundOpacity,
+                                 showStatusIndicators: showStatusIndicators,
+                                 displayTitle: displayTitle(for: tab))
                 }
             }
             return
@@ -142,11 +170,16 @@ final class TabBarView: NSView {
             let tabStatus = TerminalStatus.aggregate(
                 tab.layout.allTerminalIds().map { statuses[$0] ?? .neverRan }
             )
-            let item = TabItemView(tab: tab, isSelected: tab.id == selectedTabId, theme: theme, status: tabStatus, backgroundOpacity: backgroundOpacity, showStatusIndicators: showStatusIndicators)
+            let item = TabItemView(tab: tab, isSelected: tab.id == selectedTabId, theme: theme,
+                                   status: tabStatus, backgroundOpacity: backgroundOpacity,
+                                   showStatusIndicators: showStatusIndicators,
+                                   quickActionsStore: quickActionsStore,
+                                   displayTitle: displayTitle(for: tab))
             item.canClose = canCloseNow
             item.onSelect = { [weak self] in self?.onSelectTab?(tab.id) }
             item.onClose  = { [weak self] in self?.onCloseTab?(tab.id) }
             item.onRename = { [weak self] newTitle in self?.onRenameTab?(tab.id, newTitle) }
+            item.onResetAutoTitle = { [weak self] in self?.onResetAutoTitle?(tab.id) }
             // drop 失败（拖到 TabBarView 外）时，source 端 sessionEnded 会触发——清理 preview state
             item.onDragEnded = { [weak self] in self?.cleanupAfterDrag() }
             tabsContainer.addSubview(item)
@@ -239,8 +272,8 @@ final class TabBarView: NSView {
             IconButton(theme: currentTheme, help: String(localized: L10n.Tab.newTabTooltip.withLocale(currentLocale)), action: { [weak self] in
                 self?.onAddTab?()
             }) {
-                Text("+")
-                    .font(Font(DT.Font.body))
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .regular))
                     .foregroundColor(Color(currentTheme.textSecondary))
             }
             .environment(\.locale, currentLocale)
@@ -331,9 +364,11 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
     var onSelect: (() -> Void)?
     var onClose:  (() -> Void)?
     var onRename: ((String) -> Void)?
+    var onResetAutoTitle: (() -> Void)?
     /// 在 drag session 结束时（无论是否成功 drop）调用——用来让 TabBarView 清除 preview 状态。
     var onDragEnded: (() -> Void)?
     var canClose: Bool = true
+    private var userRenamed: Bool = false
 
     /// 拖拽 preview 中被拖 item 的 "占位" 显示——淡化 alpha 暗示它会被移走。
     var isDragGhost: Bool = false {
@@ -344,9 +379,13 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
     }
 
     private let pillView   = NSView()
+    private let kindIcon   = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let renameField = NSTextField()
     private let statusIcon = TerminalStatusIconView(frame: .zero)
+
+    /// 当前显示的 quick action id —— 用来在 refresh() 时判断是否需要换 image。
+    private var displayedQuickActionId: String?
     private var originalTitle: String = ""
     private var isRenaming: Bool = false
     private var isSelected: Bool
@@ -357,17 +396,30 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
     private var backgroundOpacity: CGFloat
     private var status: TerminalStatus
     fileprivate var showStatusIndicators: Bool = false
+    /// Look up icon source for the current tab's `quickActionId`. Setter
+    /// re-renders the icon image so changes to enabled/custom actions in
+    /// Settings propagate without rebuilding the whole TabItemView.
+    weak var quickActionsStore: QuickActionsStore? {
+        didSet { applyQuickActionImage(displayedQuickActionId) }
+    }
 
-    init(tab: TerminalTab, isSelected: Bool, theme: AppTheme, status: TerminalStatus = .neverRan, backgroundOpacity: CGFloat = 1.0, showStatusIndicators: Bool = false) {
+    init(tab: TerminalTab, isSelected: Bool, theme: AppTheme, status: TerminalStatus = .neverRan,
+         backgroundOpacity: CGFloat = 1.0, showStatusIndicators: Bool = false,
+         quickActionsStore: QuickActionsStore? = nil, displayTitle: String) {
         self.tabId = tab.id
         self.isSelected = isSelected
         self.theme = theme
         self.backgroundOpacity = backgroundOpacity
         self.status = status
+        self.displayedQuickActionId = tab.quickActionId
+        self.quickActionsStore = quickActionsStore
         super.init(frame: .zero)
         self.showStatusIndicators = showStatusIndicators
-        titleLabel.stringValue = tab.title
+        self.userRenamed = tab.userRenamed
+        titleLabel.stringValue = displayTitle
         setup()
+        applyToolTip(displayTitle)
+        applyQuickActionImage(tab.quickActionId)
         updateStyle()
         statusIcon.isHidden = !showStatusIndicators
         statusIcon.update(status: status, theme: theme)
@@ -380,6 +432,10 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
         pillView.wantsLayer = true
         pillView.layer?.masksToBounds = true
         addSubview(pillView)
+
+        kindIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        kindIcon.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(kindIcon)
 
         addSubview(statusIcon)
 
@@ -403,6 +459,17 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
         addSubview(renameField)
     }
 
+    /// AppKit tooltips don't bubble from child to parent — the tooltip shown is the
+    /// one owned by the topmost view under the cursor. Mirror the full title onto every
+    /// subview that covers the pill so hovering anywhere on the tab reveals the title.
+    private func applyToolTip(_ title: String) {
+        self.toolTip = title
+        pillView.toolTip = title
+        titleLabel.toolTip = title
+        kindIcon.toolTip = title
+        statusIcon.toolTip = title
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach { removeTrackingArea($0) }
@@ -421,19 +488,27 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
         pillView.layer?.cornerRadius = TabBarView.pillRadius
 
         let margin: CGFloat = 10
-        let iconSize: CGFloat = showStatusIndicators ? TerminalStatusIconView.size : 0
-        let iconGap: CGFloat = showStatusIndicators ? 6 : 0
+        let trailingIconSize: CGFloat = showStatusIndicators ? TerminalStatusIconView.size : 0
+        let trailingGap: CGFloat = showStatusIndicators ? 6 : 0
         if showStatusIndicators {
             statusIcon.frame = NSRect(
-                x: bounds.width - margin - iconSize, y: (h - iconSize) / 2,
-                width: iconSize, height: iconSize)
+                x: bounds.width - margin - trailingIconSize, y: (h - trailingIconSize) / 2,
+                width: trailingIconSize, height: trailingIconSize)
         }
 
+        // Leading kind icon: 13pt SF Symbol, fixed gap to title.
+        let leadingIconSize: CGFloat = 13
+        let leadingGap: CGFloat = 6
+        kindIcon.frame = NSRect(
+            x: margin, y: (h - leadingIconSize) / 2,
+            width: leadingIconSize, height: leadingIconSize)
+
         let textH = ceil(titleLabel.intrinsicContentSize.height)
-        let textX = margin
-        let textFrame = NSRect(x: textX, y: (h - textH) / 2,
-                               width: bounds.width - margin - iconSize - iconGap - textX,
-                               height: textH)
+        let textX = margin + leadingIconSize + leadingGap
+        let textFrame = NSRect(
+            x: textX, y: (h - textH) / 2,
+            width: bounds.width - margin - trailingIconSize - trailingGap - textX,
+            height: textH)
         titleLabel.frame = textFrame
         renameField.frame = textFrame
     }
@@ -507,20 +582,115 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
     func refresh(tab: TerminalTab, isSelected: Bool, theme: AppTheme,
                  canClose: Bool, status: TerminalStatus = .neverRan,
                  backgroundOpacity: CGFloat = 1.0,
-                 showStatusIndicators: Bool = false) {
+                 showStatusIndicators: Bool = false,
+                 displayTitle: String) {
         self.theme = theme
         self.backgroundOpacity = backgroundOpacity
         self.isSelected = isSelected
         self.canClose = canClose
         self.status = status
-        if titleLabel.stringValue != tab.title && !isRenaming {
-            titleLabel.stringValue = tab.title
+        self.userRenamed = tab.userRenamed
+        if titleLabel.stringValue != displayTitle && !isRenaming {
+            titleLabel.stringValue = displayTitle
+        }
+        applyToolTip(displayTitle)
+        if displayedQuickActionId != tab.quickActionId {
+            displayedQuickActionId = tab.quickActionId
+            applyQuickActionImage(tab.quickActionId)
         }
         self.showStatusIndicators = showStatusIndicators
         statusIcon.isHidden = !showStatusIndicators
         statusIcon.update(status: status, theme: theme)
         updateStyle()
         needsLayout = true
+    }
+
+    private func applyQuickActionImage(_ id: String?) {
+        guard let id = id else {
+            kindIcon.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
+            return
+        }
+        let source = quickActionsStore?.iconSource(for: id) ?? .sfSymbol("terminal")
+        switch source {
+        case .sfSymbol(let name):
+            kindIcon.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+        case .asset(let name):
+            // Pad raw asset to 13×13 with 10×10 inner content so PNG/PDF assets
+            // render at the same visible ink size as a 13pt SF Symbol (which has
+            // ~25% optical padding inside its 13pt box). Without padding the asset
+            // fills 13×13 edge-to-edge and looks ~30% larger than neighbouring SF
+            // Symbol icons.
+            kindIcon.image = NSImage(named: name).map { padAssetImage($0) }
+        case .letter(let c):
+            kindIcon.image = makeLetterImage(String(c))
+        }
+    }
+
+    /// Wrap `raw` in a 13×13 canvas with 12×12 inner content centered (0.5pt
+    /// inset on every side) — leaves just enough optical breathing room so the
+    /// asset doesn't bleed into the title gap, while keeping the visible ink
+    /// roughly aligned with the medium-weight SF Symbol glyphs in the same row.
+    /// Forwarding `isTemplate` keeps the `kindIcon.contentTintColor` recoloring
+    /// path working.
+    private func padAssetImage(_ raw: NSImage) -> NSImage {
+        let canvas = NSSize(width: 13, height: 13)
+        let inner: CGFloat = 12
+        let inset = (canvas.width - inner) / 2
+        let image = NSImage(size: canvas)
+        image.lockFocus()
+        raw.draw(in: NSRect(x: inset, y: inset, width: inner, height: inner))
+        image.unlockFocus()
+        image.isTemplate = raw.isTemplate
+        return image
+    }
+
+    /// Render a single character as a 13×13 NSImage with a 1pt circle outline,
+    /// used for custom quick action tab pills. Mirrors the SwiftUI `.letter`
+    /// branch in `QuickActionIconView` so the tab pill, top-bar bar, and
+    /// settings row all show the same letter-in-circle glyph at the same
+    /// visual size. 11pt rounded semibold matches SF Symbol cap-height roughly,
+    /// the 0.4-alpha circle stroke keeps the outline visually subordinate to
+    /// the letter while staying tinted via `isTemplate = true`.
+    private func makeLetterImage(_ s: String) -> NSImage {
+        let size = NSSize(width: 13, height: 13)
+        let image = NSImage(size: size)
+        image.lockFocus()
+
+        // Letter — 11pt rounded semibold, centered.
+        let baseFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let letterFont: NSFont = {
+            if let desc = baseFont.fontDescriptor.withDesign(.rounded),
+               let rounded = NSFont(descriptor: desc, size: 11) {
+                return rounded
+            }
+            return baseFont
+        }()
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: letterFont,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: style,
+        ]
+        let attr = NSAttributedString(string: s, attributes: attrs)
+        let textSize = attr.size()
+        let textRect = NSRect(x: 0, y: (size.height - textSize.height) / 2,
+                              width: size.width, height: textSize.height)
+        attr.draw(in: textRect)
+
+        // Circle outline at 40% alpha — preserved by template tinting.
+        let circleInset: CGFloat = 0.5
+        let circleRect = NSRect(x: circleInset, y: circleInset,
+                                width: size.width - 2 * circleInset,
+                                height: size.height - 2 * circleInset)
+        let path = NSBezierPath(ovalIn: circleRect)
+        path.lineWidth = 1
+        NSColor.labelColor.withAlphaComponent(0.4).setStroke()
+        path.stroke()
+
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
     }
 
     private func updateStyle() {
@@ -534,6 +704,7 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
             pillView.layer?.backgroundColor = .clear
             titleLabel.textColor = theme.textSecondary
         }
+        kindIcon.contentTintColor = titleLabel.textColor
         needsDisplay = true
     }
 
@@ -565,19 +736,29 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
         let pbItem = NSPasteboardItem()
         pbItem.setString(tabId.uuidString, forType: .mux0Tab)
 
+        let (ghost, frame) = snapshotForDragging()
         let draggingItem = NSDraggingItem(pasteboardWriter: pbItem)
-        let snapshot = snapshotForDragging()
-        draggingItem.setDraggingFrame(bounds, contents: snapshot)
+        draggingItem.setDraggingFrame(frame, contents: ghost)
 
         beginDraggingSession(with: [draggingItem], event: event, source: self)
     }
 
-    private func snapshotForDragging() -> NSImage {
-        guard let rep = bitmapImageRepForCachingDisplay(in: bounds) else { return NSImage() }
-        cacheDisplay(in: bounds, to: rep)
-        let image = NSImage(size: bounds.size)
-        image.addRepresentation(rep)
-        return image
+    private func snapshotForDragging() -> (image: NSImage, frame: NSRect) {
+        // 抓 pillView 区域而非整个 bounds —— TabItemView.bounds 比 pillView 多了
+        // 上下各 pillInset(=3pt) 的留白，当作 ghost 内容会让 compose 用 pillRadius
+        // 裁出来的圆角矩形顶部 / 底部各多 3pt 透明带，视觉上像内容被挤在中间。
+        // 截 pillView 的 frame 同时保留所有 sibling 子视图（kindIcon / titleLabel /
+        // statusIcon）—— cacheDisplay 会把所有与该 rect 相交的子视图一并渲染。
+        let pillFrame = pillView.frame
+        guard let rep = bitmapImageRepForCachingDisplay(in: pillFrame) else {
+            return (NSImage(), pillFrame)
+        }
+        cacheDisplay(in: pillFrame, to: rep)
+        let raw = NSImage(size: pillFrame.size)
+        raw.addRepresentation(rep)
+        return DraggedSnapshotShadow.compose(content: raw,
+                                             contentSize: pillFrame.size,
+                                             cornerRadius: TabBarView.pillRadius)
     }
 
     // NSDraggingSource
@@ -606,6 +787,15 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
         renameItem.target = self
         menu.addItem(renameItem)
 
+        // Reset belongs visually next to Rename — it's the undo for it.
+        if userRenamed {
+            let resetItem = NSMenuItem(title: L10n.string("tab.row.resetAutoTitle"),
+                                       action: #selector(resetAutoTitleTapped),
+                                       keyEquivalent: "")
+            resetItem.target = self
+            menu.addItem(resetItem)
+        }
+
         menu.addItem(.separator())
 
         let closeItem = NSMenuItem(title: L10n.string("tab.row.close"),
@@ -619,4 +809,5 @@ private final class TabItemView: NSView, NSTextFieldDelegate, NSDraggingSource {
     }
 
     @objc private func closeTapped() { onClose?() }
+    @objc private func resetAutoTitleTapped() { onResetAutoTitle?() }
 }

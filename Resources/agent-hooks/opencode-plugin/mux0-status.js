@@ -17,6 +17,36 @@ const TID  = process.env.MUX0_TERMINAL_ID;
 // outlives the turn naturally (opencode keeps it alive across turns).
 let turn = { hadError: false, tool: null, startedAt: null };
 
+// First user prompt per opencode session, captured once on chat.message and
+// reused as the sessionTitle for every subsequent emit. Matches cmux's
+// "first user message as title" strategy across all three agents — we don't
+// trust the optional LLM-generated session.title field.
+const firstPromptBySession = new Map();
+
+function captureFirstPrompt(sessionID, parts) {
+    if (!sessionID || firstPromptBySession.has(sessionID)) return;
+    const text = extractUserText(parts);
+    if (text) firstPromptBySession.set(sessionID, text);
+}
+
+function extractUserText(parts) {
+    // chat.message input.parts is an array of typed content blocks.
+    // We only care about the text ones; the first non-empty text is the
+    // user's prompt.
+    if (!Array.isArray(parts)) {
+        if (typeof parts === "string") return parts.trim().slice(0, 200);
+        return "";
+    }
+    for (const p of parts) {
+        if (!p || typeof p !== "object") continue;
+        if (p.type === "text" && typeof p.text === "string") {
+            const t = p.text.trim();
+            if (t) return t.slice(0, 200);
+        }
+    }
+    return "";
+}
+
 function emit(msg) {
     if (!SOCK || !TID) return;
     const payload = JSON.stringify({
@@ -39,6 +69,16 @@ function shortPath(p) {
     if (!p) return "";
     const parts = p.split("/").filter(Boolean);
     return parts.length > 3 ? parts.slice(-3).join("/") : parts.join("/");
+}
+
+// OpenCode session ids are alphanumeric with underscores/dashes (`ses_xxx`
+// in current versions). Restrict the resume command to this charset so a
+// malformed payload can't inject shell metacharacters into the persisted
+// `initial_input`.
+const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
+function resumeCommandFor(sessionID) {
+    if (!sessionID || !SESSION_ID_RE.test(sessionID)) return null;
+    return `opencode --session ${sessionID}`;
 }
 
 function describeOpencodeTool(tool, input) {
@@ -86,18 +126,50 @@ export const Mux0StatusPlugin = async (_input) => ({
         }
     },
 
-    "tool.execute.before": async (args) => {
-        turn.tool = args?.tool;
+    // chat.message fires when the user sends a message — opencode's
+    // equivalent of UserPromptSubmit. We attach resumeCommand here so the
+    // session id is captured even on prompts that don't trigger any tool
+    // calls (e.g. a quick chat answer with no Edit/Bash/Read).
+    "chat.message": async (input, _output) => {
         if (!turn.startedAt) turn.startedAt = Date.now() / 1000;
-        const detail = describeOpencodeTool(args?.tool, args?.input);
-        emit({ event: "running", toolDetail: detail || undefined });
+        captureFirstPrompt(input?.sessionID, input?.message?.parts ?? input?.parts);
+        const resumeCommand = resumeCommandFor(input?.sessionID);
+        // Priority: opencode's LLM-generated session.title → cached first
+        // prompt. Mirrors the claude/codex hook tiers.
+        const sessionTitle = input?.session?.title
+            || firstPromptBySession.get(input?.sessionID)
+            || "";
+        const payload = { event: "running" };
+        if (resumeCommand) payload.resumeCommand = resumeCommand;
+        if (sessionTitle) payload.sessionTitle = sessionTitle;
+        emit(payload);
     },
 
-    "tool.execute.after": async (args) => {
-        // args.error present if tool threw; args.result.status === "error"
-        // for tools that report failure in-band.
-        const hadErr = !!(args?.error)
-            || (args?.result?.status === "error");
+    // Plugin runtime calls these hooks with two args:
+    //   (input, output) where input has { tool, sessionID, callID, ... }.
+    // Tool args live on output.args (before) and output.{title,output,metadata}
+    // (after). See packages/plugin/src/index.ts in sst/opencode.
+    "tool.execute.before": async (input, output) => {
+        turn.tool = input?.tool;
+        if (!turn.startedAt) turn.startedAt = Date.now() / 1000;
+        const detail = describeOpencodeTool(input?.tool, output?.args);
+        const resumeCommand = resumeCommandFor(input?.sessionID);
+        const sessionTitle = input?.session?.title
+            || firstPromptBySession.get(input?.sessionID)
+            || "";
+        const payload = { event: "running" };
+        if (detail) payload.toolDetail = detail;
+        if (resumeCommand) payload.resumeCommand = resumeCommand;
+        if (sessionTitle) payload.sessionTitle = sessionTitle;
+        emit(payload);
+    },
+
+    "tool.execute.after": async (_input, output) => {
+        // Tools may report failure in `output.metadata.error` /
+        // `output.metadata.status`, or by throwing (which surfaces as
+        // session.error rather than reaching this hook).
+        const hadErr = !!(output?.metadata?.error)
+            || (output?.metadata?.status === "error");
         if (hadErr) turn.hadError = true;
         // No socket emit — icon only flips at session.idle / session.status{type=idle}.
     },

@@ -16,6 +16,11 @@ final class GhosttyBridge {
     /// and can only reach Swift state through the shared instance.
     var onPwdChanged: ((UUID, String) -> Void)?
 
+    /// When true, `writeClipboardCallback` skips writing to `NSPasteboard.general`.
+    /// Set by `GhosttyTerminalView.makeFrontmost` during workspace/tab switches to
+    /// prevent ghostty from syncing its internal selection into the system clipboard.
+    static var suppressClipboardWrites = false
+
     private init() {}
 
     /// Returns true on success. Call once from mux0App.init().
@@ -232,6 +237,15 @@ final class GhosttyBridge {
         defer { Self.envLock.unlock() }
 
         setenv("MUX0_TERMINAL_ID", terminalId.uuidString, 1)
+        // When the caller hasn't provided a working directory (e.g. a freshly
+        // created terminal whose pwdStore has no record yet), fall back to
+        // $HOME instead of letting ghostty inherit the spawning process's
+        // cwd. macOS Launch Services starts an .app with cwd = `/`, which
+        // breaks tools that refuse to run from a non-readable directory
+        // (Homebrew prints "current working directory must be readable to
+        // <user> to run brew", which then aborts a typical .zshrc midway and
+        // leaves $NVM_DIR / $PATH unset).
+        let resolvedWorkingDirectory = workingDirectory ?? NSHomeDirectory()
         let initialInput = WorkspaceDefaultCommand.startupInput(for: command)
 
         var surfCfg = ghostty_surface_config_new()
@@ -251,26 +265,16 @@ final class GhosttyBridge {
         // commands as initial shell input instead of Ghostty's `command` field:
         // if an SSH command exits quickly, the user lands back in their shell
         // rather than Ghostty treating the surface's main process as failed.
-        if let wd = workingDirectory, let input = initialInput {
-            return wd.withCString { wdPtr in
-                input.withCString { inputPtr in
-                    surfCfg.working_directory = wdPtr
-                    surfCfg.initial_input = inputPtr
-                    return ghostty_surface_new(appHandle, &surfCfg)
-                }
-            }
-        } else if let wd = workingDirectory {
-            return wd.withCString { ptr in
-                surfCfg.working_directory = ptr
+        return resolvedWorkingDirectory.withCString { wdPtr in
+            surfCfg.working_directory = wdPtr
+            guard let input = initialInput else {
                 return ghostty_surface_new(appHandle, &surfCfg)
             }
-        } else if let input = initialInput {
-            return input.withCString { ptr in
-                surfCfg.initial_input = ptr
+            return input.withCString { inputPtr in
+                surfCfg.initial_input = inputPtr
                 return ghostty_surface_new(appHandle, &surfCfg)
             }
         }
-        return ghostty_surface_new(appHandle, &surfCfg)
     }
 
     // MARK: - Window effects
@@ -429,6 +433,7 @@ final class GhosttyBridge {
 
     // ghostty_runtime_write_clipboard_cb: (void*, ghostty_clipboard_e, const ghostty_clipboard_content_s*, size_t, bool) -> void
     private static let writeClipboardCallback: ghostty_runtime_write_clipboard_cb = { _, _, content, count, _ in
+        guard !GhosttyBridge.suppressClipboardWrites else { return }
         guard let content = content, count > 0 else { return }
 
         // Ghostty hands us the selection as multiple MIME-tagged entries (typically

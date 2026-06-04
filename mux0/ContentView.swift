@@ -5,7 +5,9 @@ struct ContentView: View {
     @State private var store = WorkspaceStore()
     @State private var statusStore = TerminalStatusStore()
     @State private var pwdStore = TerminalPwdStore()
-    @State private var settingsStore = SettingsConfigStore()
+    @State private var sessionTitleStore = TerminalSessionTitleStore()
+    @State private var settingsStore: SettingsConfigStore
+    @State private var quickActionsStore: QuickActionsStore
     @State private var sidebarCollapsed: Bool = false
     @State private var showSettings: Bool = false
     @State private var hookListener: HookSocketListener?
@@ -18,13 +20,20 @@ struct ContentView: View {
     @Environment(LanguageStore.self) private var languageStore
     @Environment(\.locale) private var locale
 
+    init() {
+        let settings = SettingsConfigStore()
+        self._settingsStore = State(initialValue: settings)
+        self._quickActionsStore = State(initialValue: QuickActionsStore(settings: settings))
+    }
+
     private let trafficLightInset: CGFloat = 28
     private let cardInset: CGFloat = 8
     private let cardRadius: CGFloat = DT.Radius.card
-    /// 与 sidebar row 的状态图标列同中轴：图标中心距 sidebar 右 =
-    /// outerHorizontalInset(8) + hPad(12) + iconSize/2(5) = 25；按钮(22)左边距 = width - 25 - 11。
-    /// 三个按钮（本按钮、header "+"、footer 齿轮）都落在这条轴上。
-    private let sidebarToggleLeading: CGFloat = DT.Layout.sidebarWidth - 25 - 11
+    /// 顶部一对按钮（toggle 在左、"+"" 在右）容器 leading：
+    /// 让"+"按钮中心仍与 sidebar row 状态图标列对齐 = sidebarWidth - 25；
+    /// 容器起点 = (sidebarWidth - 25) - 11 - (按钮宽 22 + xs 间距 4) = sidebarWidth - 62。
+    /// 这样 toggle 相对原位置向左挪了一格，"+"接管原 toggle 的图标列轴线。
+    private let headerControlsLeading: CGFloat = DT.Layout.sidebarWidth - 25 - 11 - (22 + DT.Space.xs)
 
     /// Master UI gate for the sidebar + tab bar status icons. True iff the user
     /// has enabled at least one agent in Settings → Agents; false collapses the
@@ -71,6 +80,9 @@ struct ContentView: View {
                         store: store,
                         statusStore: statusStore,
                         pwdStore: pwdStore,
+                        sessionTitleStore: sessionTitleStore,
+                        settings: settingsStore,
+                        quickActionsStore: quickActionsStore,
                         theme: themeManager.theme,
                         backgroundOpacity: contentBg,
                         showStatusIndicators: showStatusIndicators,
@@ -84,6 +96,8 @@ struct ContentView: View {
                             theme: themeManager.theme,
                             settings: settingsStore,
                             updateStore: updateStore,
+                            workspaceStore: store,
+                            quickActionsStore: quickActionsStore,
                             initialSection: pendingSettingsSection,
                             onClose: { showSettings = false }
                         )
@@ -91,14 +105,42 @@ struct ContentView: View {
                 }
                 .background(Color(themeManager.theme.canvas).opacity(contentBg))
                 .clipShape(RoundedRectangle(cornerRadius: cardRadius, style: .continuous))
+                .overlay {
+                    // 浅边框：颜色取 theme.border，alpha 随 contentShadowIntensity 线性缩放。
+                    // 强度 = 0 时彻底不画（避免在透明背景上叠出 0 alpha 描边的 hairline 噪点）。
+                    let intensity = themeManager.contentShadowIntensity
+                    if intensity > 0 {
+                        RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+                            .strokeBorder(
+                                Color(themeManager.theme.border).opacity(Double(intensity) * 0.6),
+                                lineWidth: DT.Stroke.hairline
+                            )
+                    }
+                }
+                .shadow(
+                    color: .black.opacity(Double(themeManager.contentShadowIntensity) * 0.18),
+                    radius: 6 + themeManager.contentShadowIntensity * 6,
+                    x: 0,
+                    y: 2
+                )
                 .padding(.top, trafficLightInset)
                 .padding(.leading, sidebarCollapsed ? cardInset : 0)
                 .padding(.trailing, cardInset)
                 .padding(.bottom, cardInset)
             }
 
-            sidebarToggleButton
-                .padding(.leading, sidebarToggleLeading)
+            HStack(spacing: DT.Space.xs) {
+                sidebarToggleButton
+                if !sidebarCollapsed {
+                    addWorkspaceButton
+                }
+            }
+            .padding(.leading, headerControlsLeading)
+            .padding(.top, DT.Space.xs)
+
+            quickActionsBar
+                .frame(maxWidth: .infinity, alignment: .topTrailing)
+                .padding(.trailing, cardInset + DT.Space.xs)
                 .padding(.top, DT.Space.xs)
         }
         .frame(minWidth: 960, minHeight: 620)
@@ -146,16 +188,23 @@ struct ContentView: View {
                 themeManager.refresh()
                 applyUnfocusedOpacityFromSettings()
             }
+            // Inject the session title store into WorkspaceStore so rename-lock
+            // cleanup can clear titles when a tab is closed or a terminal is split.
+            store.sessionTitleStore = sessionTitleStore
             if hookListener == nil {
                 let path = HookSocketListener.defaultPath
                 do {
                     let listener = try HookSocketListener(path: path)
                     let store = self.statusStore
                     let settingsStoreRef = self.settingsStore
+                    let workspaceStoreRef = self.store
+                    let sessionTitleStoreRef = self.sessionTitleStore
                     listener.onMessage = { msg in
                         HookDispatcher.dispatch(msg,
                                                 settings: settingsStoreRef,
-                                                store: store)
+                                                store: store,
+                                                workspaceStore: workspaceStoreRef,
+                                                sessionTitleStore: sessionTitleStoreRef)
                     }
                     try listener.start()
                     hookListener = listener
@@ -235,7 +284,9 @@ struct ContentView: View {
         let blur = CGFloat(blurRaw.flatMap { Double($0) } ?? 0)
         let contentRaw = settingsStore.get("mux0-content-opacity")
         let content = CGFloat(contentRaw.flatMap { Double($0) } ?? 1.0)
-        themeManager.applyWindowEffects(opacity: opacity, blurRadius: blur, contentOpacity: content)
+        let shadowRaw = settingsStore.get("mux0-content-shadow")
+        let shadow = CGFloat(shadowRaw.flatMap { Double($0) } ?? 0)
+        themeManager.applyWindowEffects(opacity: opacity, blurRadius: blur, contentOpacity: content, contentShadow: shadow)
     }
 
     private var sidebarToggleButton: some View {
@@ -252,6 +303,54 @@ struct ContentView: View {
                 .foregroundColor(Color(themeManager.theme.textSecondary))
         }
     }
+
+    /// 顶部"+"按钮：触发 SidebarView 监听的 mux0BeginCreateWorkspace 通知，
+    /// 由 sidebar 内部计算默认名称并继承当前 pwd。仅在 sidebar 展开时显示——
+    /// 收起时 SidebarView 不在视图树里，没人响应该通知。
+    private var addWorkspaceButton: some View {
+        IconButton(
+            theme: themeManager.theme,
+            help: String(localized: L10n.Sidebar.newWorkspace.withLocale(locale))
+        ) {
+            NotificationCenter.default.post(name: .mux0BeginCreateWorkspace, object: nil)
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 13, weight: .regular))
+                .foregroundColor(Color(themeManager.theme.textSecondary))
+        }
+    }
+
+    @ViewBuilder
+    private var quickActionsBar: some View {
+        let displayList = quickActionsStore.displayList
+        if !displayList.isEmpty {
+            HStack(spacing: DT.Space.xs) {
+                ForEach(displayList, id: \.self) { id in
+                    quickActionButton(id: id)
+                }
+            }
+        }
+    }
+
+    private func quickActionButton(id: QuickActionId) -> some View {
+        let tooltip = quickActionsStore.displayName(for: id, locale: locale)
+        let icon = quickActionsStore.iconSource(for: id)
+        return IconButton(theme: themeManager.theme, help: tooltip) {
+            guard let wsId = store.selectedId,
+                  let result = store.addQuickActionTab(id: id, title: tooltip, in: wsId)
+            else { return }
+            if let prev = result.sourcePwdTerminalId {
+                pwdStore.inherit(from: prev, to: result.terminalId)
+            }
+        } label: {
+            QuickActionIconView(
+                source: icon,
+                size: 13,
+                color: Color(themeManager.theme.textSecondary)
+            )
+        }
+        .disabled(store.selectedId == nil)
+    }
 }
 
 // MARK: - Notification names
@@ -265,17 +364,26 @@ extension Notification.Name {
     static let mux0SelectNextTab        = Notification.Name("mux0.selectNextTab")
     static let mux0SelectPrevTab        = Notification.Name("mux0.selectPrevTab")
     static let mux0SelectTabAtIndex     = Notification.Name("mux0.selectTabAtIndex")
+    static let mux0SelectWorkspaceAtIndex = Notification.Name("mux0.selectWorkspaceAtIndex")
 
     // Pane focus navigation (also bound in the "Terminal" menu).
     static let mux0FocusNextPane        = Notification.Name("mux0.focusNextPane")
     static let mux0FocusPrevPane        = Notification.Name("mux0.focusPrevPane")
 
-    // Edit menu → focused GhosttyTerminalView (routes to ghostty_surface_binding_action).
-    static let mux0Copy                 = Notification.Name("mux0.copy")
-    static let mux0Paste                = Notification.Name("mux0.paste")
-    static let mux0SelectAll            = Notification.Name("mux0.selectAll")
+    // 注：Edit > Copy / Paste / Select All 不走通知。⌘C/⌘V/⌘A 在 mux0App 的
+    // pasteboard CommandGroup 里通过 NSApp.sendAction(_:to:nil) 沿 responder
+    // chain 派发，命中 NSText（rename / 设置面板的 TextField）或终端
+    // GhosttyTerminalView 的同名 selector。
 
     // Settings
     static let mux0OpenSettings         = Notification.Name("mux0.openSettings")
     static let mux0EditConfigFile       = Notification.Name("mux0.editConfigFile")
+
+    /// Posted by the Agents → Notifications → Codex toggle when the user
+    /// flips it ON, so the section view can present its experimental-flag
+    /// alert. Routed via NotificationCenter (instead of an `onTurnOn`
+    /// parameter) so every row in the ForEach has an identical view
+    /// signature — Form(.grouped) splits a row out into its own card if
+    /// any neighbour differs.
+    static let mux0CodexHookAlert       = Notification.Name("mux0.codexHookAlert")
 }

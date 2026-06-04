@@ -24,6 +24,25 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedId, betaId)
     }
 
+    func testSelectWorkspace_unknownIdIsNoop() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "alpha")
+        let alphaId = store.workspaces[0].id
+        let unknownId = UUID()
+        store.select(id: unknownId)
+        XCTAssertEqual(store.selectedId, alphaId,
+                       "Selecting an unknown workspace id should not change selectedId")
+    }
+
+    func testSelectWorkspace_sameIdIsNoop() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "alpha")
+        let alphaId = store.workspaces[0].id
+        store.select(id: alphaId)  // already selected
+        XCTAssertEqual(store.selectedId, alphaId,
+                       "Re-selecting the already-selected workspace id should leave selectedId unchanged")
+    }
+
     func testDeleteWorkspace() {
         let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
         store.createWorkspace(name: "to-delete")
@@ -193,14 +212,19 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.workspaces[0].tabs[0].title, original)
     }
 
-    func testRenameTab_sameNameIsNoop() {
+    func testRenameTab_sameNameStillLocksUserRenamed() {
+        // Renaming a tab to its current title still counts as an explicit
+        // user commit on the rename UI — title field stays the same, but
+        // userRenamed flips to true so the auto-naming pipeline backs off.
         let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
         store.createWorkspace(name: "ws")
         let wsId = store.workspaces[0].id
         let tabId = store.workspaces[0].tabs[0].id
         let original = store.workspaces[0].tabs[0].title
+        XCTAssertFalse(store.workspaces[0].tabs[0].userRenamed)
         store.renameTab(id: tabId, in: wsId, to: original)
         XCTAssertEqual(store.workspaces[0].tabs[0].title, original)
+        XCTAssertTrue(store.workspaces[0].tabs[0].userRenamed)
     }
 
     // MARK: - Move tab
@@ -453,5 +477,397 @@ final class WorkspaceStoreTests: XCTestCase {
         } else {
             XCTFail("new workspace's first tab must be a single terminal leaf")
         }
+    }
+
+    // MARK: - Agent resume / prefill
+
+    /// Helper: return the (single) terminalId of the (single) tab in the
+    /// (single) workspace of a freshly-built store.
+    private func firstTerminalId(_ store: WorkspaceStore) -> UUID {
+        store.workspaces[0].tabs[0].layout.allTerminalIds()[0]
+    }
+
+    func testRecordResumeCommandWritesIntoPendingPrefills() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let term = firstTerminalId(store)
+
+        store.recordResumeCommand(terminalId: term, command: "claude --resume abc")
+
+        XCTAssertEqual(store.workspaces[0].pendingPrefills[term.uuidString],
+                       "claude --resume abc")
+    }
+
+    func testRecordResumeCommandTrimsWhitespace() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let term = firstTerminalId(store)
+
+        store.recordResumeCommand(terminalId: term, command: "  codex resume xyz  \n")
+
+        XCTAssertEqual(store.workspaces[0].pendingPrefills[term.uuidString],
+                       "codex resume xyz")
+    }
+
+    func testRecordResumeCommandUnknownTerminalNoOp() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+
+        store.recordResumeCommand(terminalId: UUID(), command: "claude --resume nope")
+
+        XCTAssertTrue(store.workspaces[0].pendingPrefills.isEmpty)
+    }
+
+    func testRecordResumeCommandEmptyValueIgnored() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let term = firstTerminalId(store)
+
+        store.recordResumeCommand(terminalId: term, command: "   ")
+
+        XCTAssertTrue(store.workspaces[0].pendingPrefills.isEmpty)
+    }
+
+    func testRecordResumeCommandLatestValueWins() {
+        // A second prompt within the same session (e.g. after /clear or
+        // /resume) emits a new resumeCommand — pendingPrefills must reflect
+        // the newest value, since that's the session id the user is
+        // actively working in and would want to resume on next launch.
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let term = firstTerminalId(store)
+
+        store.recordResumeCommand(terminalId: term, command: "claude --resume old")
+        store.recordResumeCommand(terminalId: term, command: "claude --resume new")
+
+        XCTAssertEqual(store.workspaces[0].pendingPrefills[term.uuidString],
+                       "claude --resume new")
+    }
+
+    func testConsumePendingPrefillReadsButDoesNotClear() {
+        // pendingPrefills must survive a "relaunch + no new prompt"
+        // scenario, so consume reads non-destructively. Only the next
+        // recordResumeCommand call overwrites it.
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let term = firstTerminalId(store)
+        store.recordResumeCommand(terminalId: term, command: "claude --resume abc")
+
+        let first = store.consumePendingPrefill(terminalId: term)
+        let second = store.consumePendingPrefill(terminalId: term)
+
+        XCTAssertEqual(first, "claude --resume abc")
+        XCTAssertEqual(second, "claude --resume abc")
+        XCTAssertEqual(store.workspaces[0].pendingPrefills[term.uuidString],
+                       "claude --resume abc")
+    }
+
+    func testConsumePendingPrefillUnknownTerminalReturnsNil() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        XCTAssertNil(store.consumePendingPrefill(terminalId: UUID()))
+    }
+
+    func testWorkspaceCodableRoundTripPreservesPendingPrefill() throws {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let term = firstTerminalId(store)
+        store.recordResumeCommand(terminalId: term, command: "claude --resume rt")
+
+        let data = try JSONEncoder().encode(store.workspaces)
+        let decoded = try JSONDecoder().decode([Workspace].self, from: data)
+
+        XCTAssertEqual(decoded[0].pendingPrefills[term.uuidString], "claude --resume rt")
+    }
+
+    func testCloseTerminalDropsItsPendingPrefill() {
+        // Splitting yields a 2-leaf tab; after recording resume on each leaf
+        // and closing one, only the survivor's entry must remain — otherwise
+        // pendingPrefills accumulates orphan terminalId keys forever.
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let wsId = store.workspaces[0].id
+        let tabId = store.workspaces[0].tabs[0].id
+        let term1 = firstTerminalId(store)
+        guard let term2 = store.splitTerminal(id: term1, in: wsId, tabId: tabId,
+                                              direction: .vertical) else {
+            return XCTFail("split failed")
+        }
+        store.recordResumeCommand(terminalId: term1, command: "claude --resume one")
+        store.recordResumeCommand(terminalId: term2, command: "claude --resume two")
+
+        store.closeTerminal(id: term1, in: wsId, tabId: tabId)
+
+        XCTAssertNil(store.workspaces[0].pendingPrefills[term1.uuidString])
+        XCTAssertEqual(store.workspaces[0].pendingPrefills[term2.uuidString],
+                       "claude --resume two")
+    }
+
+    func testClearResumePrefillsForClaudeKeepsCodexEntries() {
+        // Clearing one agent's stored resume commands must not touch the
+        // other's — users may turn off claude's auto-resume while still
+        // wanting codex's to fire.
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let wsId = store.workspaces[0].id
+        let tabId = store.workspaces[0].tabs[0].id
+        let term1 = firstTerminalId(store)
+        guard let term2 = store.splitTerminal(id: term1, in: wsId, tabId: tabId,
+                                              direction: .vertical) else {
+            return XCTFail("split failed")
+        }
+        store.recordResumeCommand(terminalId: term1, command: "claude --resume one")
+        store.recordResumeCommand(terminalId: term2, command: "codex resume two")
+
+        store.clearResumePrefills(forAgent: .claude)
+
+        XCTAssertNil(store.workspaces[0].pendingPrefills[term1.uuidString])
+        XCTAssertEqual(store.workspaces[0].pendingPrefills[term2.uuidString],
+                       "codex resume two")
+    }
+
+    func testClearResumePrefillsForOpencodeKeepsClaude() {
+        // OpenCode has its own resume CLI (`opencode --session <id>`). The
+        // clear-by-agent helper must drop ONLY opencode entries, leaving
+        // claude/codex stored values alone.
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let wsId = store.workspaces[0].id
+        let tabId = store.workspaces[0].tabs[0].id
+        let term1 = firstTerminalId(store)
+        guard let term2 = store.splitTerminal(id: term1, in: wsId, tabId: tabId,
+                                              direction: .vertical) else {
+            return XCTFail("split failed")
+        }
+        store.recordResumeCommand(terminalId: term1, command: "claude --resume keep")
+        store.recordResumeCommand(terminalId: term2, command: "opencode --session drop")
+
+        store.clearResumePrefills(forAgent: .opencode)
+
+        XCTAssertEqual(store.workspaces[0].pendingPrefills[term1.uuidString],
+                       "claude --resume keep")
+        XCTAssertNil(store.workspaces[0].pendingPrefills[term2.uuidString])
+    }
+
+    func testRemoveTabDropsAllItsTerminalsPendingPrefills() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "p")
+        let wsId = store.workspaces[0].id
+        let tab1Id = store.workspaces[0].tabs[0].id
+        let term1 = firstTerminalId(store)
+        guard let term2 = store.splitTerminal(id: term1, in: wsId, tabId: tab1Id,
+                                              direction: .vertical) else {
+            return XCTFail("split failed")
+        }
+        guard let extra = store.addTab(to: wsId) else { return XCTFail("addTab failed") }
+        store.recordResumeCommand(terminalId: term1, command: "claude --resume one")
+        store.recordResumeCommand(terminalId: term2, command: "claude --resume two")
+        store.recordResumeCommand(terminalId: extra.terminalId, command: "claude --resume three")
+
+        store.removeTab(id: tab1Id, from: wsId)
+
+        XCTAssertNil(store.workspaces[0].pendingPrefills[term1.uuidString])
+        XCTAssertNil(store.workspaces[0].pendingPrefills[term2.uuidString])
+        XCTAssertEqual(store.workspaces[0].pendingPrefills[extra.terminalId.uuidString],
+                       "claude --resume three")
+    }
+
+    // MARK: - quickActionId & addQuickActionTab
+
+    func testTerminalTabQuickActionId_codableRoundTrip_gituiValue() throws {
+        var tab = TerminalTab(title: "GitUI")
+        tab.quickActionId = "gitui"
+
+        let data = try JSONEncoder().encode(tab)
+        let decoded = try JSONDecoder().decode(TerminalTab.self, from: data)
+
+        XCTAssertEqual(decoded.quickActionId, "gitui")
+        XCTAssertEqual(decoded.title, "GitUI")
+    }
+
+    func testTerminalTabQuickActionId_codableRoundTrip_nilValue() throws {
+        let tab = TerminalTab(title: "terminal 1")
+        XCTAssertNil(tab.quickActionId)
+
+        let data = try JSONEncoder().encode(tab)
+        let decoded = try JSONDecoder().decode(TerminalTab.self, from: data)
+
+        XCTAssertNil(decoded.quickActionId)
+    }
+
+    func testTerminalTabQuickActionId_decodingLegacyJSONWithoutField() throws {
+        // Old persistence had no `quickActionId` key. Decoding must succeed and
+        // land on nil, otherwise existing UserDefaults blobs break on upgrade.
+        let termId = UUID()
+        let tabId = UUID()
+        let json = """
+        {
+            "id": "\(tabId.uuidString)",
+            "title": "old tab",
+            "layout": { "type": "terminal", "terminalId": "\(termId.uuidString)" },
+            "focusedTerminalId": "\(termId.uuidString)"
+        }
+        """
+        let data = json.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(TerminalTab.self, from: data)
+
+        XCTAssertNil(decoded.quickActionId)
+        XCTAssertEqual(decoded.title, "old tab")
+        XCTAssertEqual(decoded.id, tabId)
+    }
+
+    func testAddQuickActionTab_createsNewWhenAbsent() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "ws")
+        let wsId = store.workspaces[0].id
+        let tabsBefore = store.workspaces[0].tabs.count
+
+        let result = store.addQuickActionTab(id: "gitui", title: "GitUI", in: wsId)
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(store.workspaces[0].tabs.count, tabsBefore + 1)
+        XCTAssertEqual(store.workspaces[0].selectedTabId, result?.tabId)
+        let newTab = store.workspaces[0].tabs.first(where: { $0.id == result?.tabId })
+        XCTAssertEqual(newTab?.quickActionId, "gitui")
+        XCTAssertEqual(newTab?.title, "GitUI")
+        XCTAssertEqual(newTab?.layout.allTerminalIds().first, result?.terminalId)
+    }
+
+    func testAddQuickActionTab_alwaysCreatesNewEvenWhenIdMatchesExisting() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "ws")
+        let wsId = store.workspaces[0].id
+        let firstResult = store.addQuickActionTab(id: "gitui", title: "GitUI", in: wsId)
+        XCTAssertNotNil(firstResult)
+        let tabsAfterFirst = store.workspaces[0].tabs.count
+
+        // Switch focus away from the gitui tab, then re-invoke
+        let originalTabId = store.workspaces[0].tabs[0].id
+        store.selectTab(id: originalTabId, in: wsId)
+
+        let secondResult = store.addQuickActionTab(id: "gitui", title: "GitUI", in: wsId)
+
+        // Top-bar quick-action button is "create new" — must NOT reuse the existing
+        // gitui tab. Each click must spawn a fresh session.
+        XCTAssertNotNil(secondResult)
+        XCTAssertNotEqual(secondResult?.tabId, firstResult?.tabId)
+        XCTAssertEqual(store.workspaces[0].tabs.count, tabsAfterFirst + 1)
+        XCTAssertEqual(store.workspaces[0].selectedTabId, secondResult?.tabId)
+        let gituiTabs = store.workspaces[0].tabs.filter { $0.quickActionId == "gitui" }
+        XCTAssertEqual(gituiTabs.count, 2)
+    }
+
+    func testAddQuickActionTab_returnsSourcePwdTerminalIdFromPreviouslyFocusedTab() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "ws")
+        let wsId = store.workspaces[0].id
+        // The auto-created tab from createWorkspace has one terminal — capture its id.
+        let originalTab = store.workspaces[0].tabs[0]
+        let originalTermId = originalTab.layout.allTerminalIds()[0]
+        XCTAssertEqual(store.workspaces[0].selectedTabId, originalTab.id)
+
+        let result = store.addQuickActionTab(id: "gitui", title: "GitUI", in: wsId)
+
+        // Source = focused terminal of the tab that was selected BEFORE we switched.
+        XCTAssertEqual(result?.sourcePwdTerminalId, originalTermId)
+    }
+
+    func testAddQuickActionTab_unknownWorkspaceReturnsNil() {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "ws")
+
+        // Calling on an unknown workspace must not crash and must not mutate anything.
+        let tabsBefore = store.workspaces[0].tabs.count
+        let result = store.addQuickActionTab(id: "gitui", title: "GitUI", in: UUID())
+
+        XCTAssertNil(result)
+        XCTAssertEqual(store.workspaces[0].tabs.count, tabsBefore)
+    }
+
+    func test_addQuickActionTab_differentIdsCreateDifferentTabs() {
+        let store = WorkspaceStore(persistenceKey: "test.\(UUID().uuidString)")
+        store.createWorkspace(name: "ws")
+        let wsId = store.workspaces[0].id
+        let r1 = store.addQuickActionTab(id: "gitui", title: "GitUI", in: wsId)
+        let r2 = store.addQuickActionTab(id: "claude", title: "Claude Code", in: wsId)
+        XCTAssertNotNil(r1)
+        XCTAssertNotNil(r2)
+        XCTAssertNotEqual(r1?.tabId, r2?.tabId)
+    }
+
+    func test_addQuickActionTab_titleAppliedOnCreate() {
+        let store = WorkspaceStore(persistenceKey: "test.\(UUID().uuidString)")
+        store.createWorkspace(name: "ws")
+        let wsId = store.workspaces[0].id
+        let r = store.addQuickActionTab(id: "claude", title: "Claude Code", in: wsId)
+        let tab = store.workspaces[0].tabs.first(where: { $0.id == r?.tabId })!
+        XCTAssertEqual(tab.title, "Claude Code")
+        XCTAssertEqual(tab.quickActionId, "claude")
+    }
+}
+
+// MARK: - Rename lock + session title store cleanup
+
+final class WorkspaceStoreRenameLockTests: XCTestCase {
+
+    private func makeStore() -> WorkspaceStore {
+        let store = WorkspaceStore(persistenceKey: "test-\(UUID())")
+        store.createWorkspace(name: "ws")
+        return store
+    }
+
+    func testRenameTabSetsUserRenamedTrue() {
+        let ws = makeStore()
+        let wsId = ws.workspaces[0].id
+        let (tabId, _) = ws.addTab(to: wsId)!
+        ws.renameTab(id: tabId, in: wsId, to: "My Custom Name")
+        let tab = ws.workspaces[0].tabs.first { $0.id == tabId }!
+        XCTAssertEqual(tab.title, "My Custom Name")
+        XCTAssertTrue(tab.userRenamed)
+    }
+
+    func testResetTabToAutoTitleClearsLock() {
+        let ws = makeStore()
+        let wsId = ws.workspaces[0].id
+        let (tabId, _) = ws.addTab(to: wsId)!
+        ws.renameTab(id: tabId, in: wsId, to: "Locked")
+        ws.resetTabToAutoTitle(tabId: tabId, in: wsId)
+        let tab = ws.workspaces[0].tabs.first { $0.id == tabId }!
+        XCTAssertFalse(tab.userRenamed)
+        // title field unchanged — fallback path will continue to show it
+        // until next hook emit overrides via the store.
+        XCTAssertEqual(tab.title, "Locked")
+    }
+
+    func testCloseTerminalClearsSessionTitleStore() {
+        let ws = makeStore()
+        let titleStore = TerminalSessionTitleStore(persistenceKey: "test-\(UUID())")
+        ws.sessionTitleStore = titleStore
+        let wsId = ws.workspaces[0].id
+        let (tabId, termId) = ws.addTab(to: wsId)!
+        // Split so close doesn't auto-remove the tab.
+        let newTermId = ws.splitTerminal(id: termId, in: wsId, tabId: tabId,
+                                         direction: .vertical)!
+        titleStore.update(terminalId: termId, title: "Left", at: 1)
+        titleStore.update(terminalId: newTermId, title: "Right", at: 1)
+        ws.closeTerminal(id: termId, in: wsId, tabId: tabId)
+        XCTAssertNil(titleStore.title(for: termId))
+        XCTAssertEqual(titleStore.title(for: newTermId), "Right")
+    }
+
+    func testRemoveTabClearsAllItsTerminalsInStore() {
+        let ws = makeStore()
+        let titleStore = TerminalSessionTitleStore(persistenceKey: "test-\(UUID())")
+        ws.sessionTitleStore = titleStore
+        let wsId = ws.workspaces[0].id
+        let (tabId, termId) = ws.addTab(to: wsId)!
+        let split2 = ws.splitTerminal(id: termId, in: wsId, tabId: tabId,
+                                       direction: .horizontal)!
+        titleStore.update(terminalId: termId, title: "A", at: 1)
+        titleStore.update(terminalId: split2, title: "B", at: 1)
+        ws.removeTab(id: tabId, from: wsId)
+        XCTAssertNil(titleStore.title(for: termId))
+        XCTAssertNil(titleStore.title(for: split2))
     }
 }

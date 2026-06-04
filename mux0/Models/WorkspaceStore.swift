@@ -8,6 +8,13 @@ final class WorkspaceStore {
     private let persistenceKey: String
     private var saveWorkItem: DispatchWorkItem?  // debounce rapid ratio updates
 
+    /// Optional link to the session title store so close/remove paths can
+    /// purge stale `terminalId → title` mappings. Wired by `ContentView` at
+    /// app startup. Tests can construct a `WorkspaceStore` without it; in
+    /// production the store has app-lifetime ownership in ContentView so
+    /// `weak` is safe and prevents retain cycles.
+    weak var sessionTitleStore: TerminalSessionTitleStore?
+
     init(persistenceKey: String = "mux0.workspaces.v2") {
         self.persistenceKey = persistenceKey
         load()
@@ -38,6 +45,10 @@ final class WorkspaceStore {
     }
 
     func deleteWorkspace(id: UUID) {
+        if let wsIdx = wsIndex(id) {
+            let allLeaves = workspaces[wsIdx].tabs.flatMap { $0.layout.allTerminalIds() }
+            sessionTitleStore?.clear(terminalIds: allLeaves)
+        }
         workspaces.removeAll { $0.id == id }
         if selectedId == id { selectedId = workspaces.first?.id }
         save()
@@ -97,10 +108,15 @@ final class WorkspaceStore {
     // MARK: - Tab CRUD
 
     @discardableResult
-    func addTab(to workspaceId: UUID) -> (tabId: UUID, terminalId: UUID)? {
+    func addTab(to workspaceId: UUID, quickActionId: String? = nil, title: String? = nil)
+        -> (tabId: UUID, terminalId: UUID)?
+    {
         guard let wsIdx = wsIndex(workspaceId) else { return nil }
         let index = workspaces[wsIdx].tabs.count + 1
-        let tab = makeNewTab(index: index)
+        let resolvedTitle: String = title ?? "terminal \(index)"
+        var tab = makeNewTab(index: index)
+        tab.title = resolvedTitle
+        tab.quickActionId = quickActionId
         workspaces[wsIdx].tabs.append(tab)
         workspaces[wsIdx].selectedTabId = tab.id
         save()
@@ -113,6 +129,13 @@ final class WorkspaceStore {
         guard let wsIdx = wsIndex(workspaceId) else { return }
         // Find the index before removal so we can select the adjacent tab
         let closedIdx = workspaces[wsIdx].tabs.firstIndex(where: { $0.id == id })
+        if let tIdx = closedIdx {
+            let leafIds = workspaces[wsIdx].tabs[tIdx].layout.allTerminalIds()
+            for tid in leafIds {
+                workspaces[wsIdx].pendingPrefills.removeValue(forKey: tid.uuidString)
+            }
+            sessionTitleStore?.clear(terminalIds: leafIds)
+        }
         workspaces[wsIdx].tabs.removeAll { $0.id == id }
         if workspaces[wsIdx].tabs.isEmpty {
             let replacement = makeNewTab(index: 1)
@@ -137,10 +160,61 @@ final class WorkspaceStore {
         let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let wsIdx = wsIndex(workspaceId),
-              let tIdx = tabIndex(id, in: wsIdx),
-              workspaces[wsIdx].tabs[tIdx].title != trimmed else { return }
-        workspaces[wsIdx].tabs[tIdx].title = trimmed
+              let tIdx = tabIndex(id, in: wsIdx) else { return }
+        // Always set userRenamed=true (even if title unchanged) — the user
+        // explicitly hit enter on the rename UI, signaling intent to lock.
+        var changed = false
+        if workspaces[wsIdx].tabs[tIdx].title != trimmed {
+            workspaces[wsIdx].tabs[tIdx].title = trimmed
+            changed = true
+        }
+        if !workspaces[wsIdx].tabs[tIdx].userRenamed {
+            workspaces[wsIdx].tabs[tIdx].userRenamed = true
+            changed = true
+        }
+        if changed { save() }
+    }
+
+    /// Clear the manual-rename lock on a tab. After this, the tab falls
+    /// back to the auto title chain (`TerminalSessionTitleStore[focused]`
+    /// → tab.title). `title` itself is left as-is; next agent hook emit
+    /// will overwrite the displayed value via the store.
+    func resetTabToAutoTitle(tabId: UUID, in workspaceId: UUID) {
+        guard let wsIdx = wsIndex(workspaceId),
+              let tIdx = tabIndex(tabId, in: wsIdx),
+              workspaces[wsIdx].tabs[tIdx].userRenamed else { return }
+        workspaces[wsIdx].tabs[tIdx].userRenamed = false
         save()
+    }
+
+    /// 在给定 workspace 总是新建一个 quickActionId 等于 `id` 的 tab，并切到它。
+    ///
+    /// 不复用同 id 的现有 tab —— 顶栏的 Quick Actions 按钮是"新建快捷 tab"，
+    /// 而非"切到那个 tab"，每点一次都要起一个全新会话。
+    ///
+    /// `sourcePwdTerminalId` = 调用此方法 *之前* selected tab 的 focusedTerminalId，
+    /// 由调用方用于 `TerminalPwdStore.inherit(from:to:)`，让 quick action 命令落地在
+    /// 用户当下浏览的 cwd。必须在 addTab 切换 selectedTabId 之前 capture，否则之后
+    /// 取到的就是新 quick action tab 自身的终端，pwd 继承变成自我赋值。
+    @discardableResult
+    func addQuickActionTab(id: String, title: String, in workspaceId: UUID) -> (
+        tabId: UUID,
+        terminalId: UUID,
+        sourcePwdTerminalId: UUID?
+    )? {
+        guard let wsIdx = wsIndex(workspaceId) else { return nil }
+        let sourcePwdTerminalId: UUID? = {
+            guard let selId = workspaces[wsIdx].selectedTabId,
+                  let selTab = workspaces[wsIdx].tabs.first(where: { $0.id == selId })
+            else { return nil }
+            return selTab.focusedTerminalId
+        }()
+
+        guard let created = addTab(to: workspaceId, quickActionId: id, title: title) else {
+            assertionFailure("addTab failed despite validated workspaceId — invariant broken")
+            return nil
+        }
+        return (created.tabId, created.terminalId, sourcePwdTerminalId)
     }
 
     // MARK: - Split operations
@@ -166,6 +240,8 @@ final class WorkspaceStore {
         let tab = workspaces[wsIdx].tabs[tIdx]
         if let newLayout = tab.layout.removing(terminalId: terminalId) {
             workspaces[wsIdx].tabs[tIdx].layout = newLayout
+            workspaces[wsIdx].pendingPrefills.removeValue(forKey: terminalId.uuidString)
+            sessionTitleStore?.clear(terminalId: terminalId)
             if tab.focusedTerminalId == terminalId {
                 // Safe: newLayout is non-nil so it contains at least one terminal
                 workspaces[wsIdx].tabs[tIdx].focusedTerminalId =
@@ -205,6 +281,53 @@ final class WorkspaceStore {
               let tIdx = tabIndex(tabId, in: wsIdx) else { return }
         workspaces[wsIdx].tabs[tIdx].layout = layout
         save()
+    }
+
+    // MARK: - Agent resume / prefill
+
+    private func wsIndexContaining(terminalId: UUID) -> Int? {
+        workspaces.firstIndex { ws in
+            ws.tabs.contains { $0.layout.allTerminalIds().contains(terminalId) }
+        }
+    }
+
+    /// Persist the latest agent resume command for `terminalId`. Synchronous
+    /// save — the value must survive force-quit / crash with no termination
+    /// hook. No-op when unchanged.
+    func recordResumeCommand(terminalId: UUID, command: String) {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let wsIdx = wsIndexContaining(terminalId: terminalId) else { return }
+        let key = terminalId.uuidString
+        guard workspaces[wsIdx].pendingPrefills[key] != trimmed else { return }
+        workspaces[wsIdx].pendingPrefills[key] = trimmed
+        save()
+    }
+
+    /// Non-destructive read: a relaunch that lands back inside the agent and
+    /// quits without typing a new prompt should still resume the same session
+    /// next time. Only the next `recordResumeCommand` overwrites.
+    func consumePendingPrefill(terminalId: UUID) -> String? {
+        guard let wsIdx = wsIndexContaining(terminalId: terminalId) else { return nil }
+        return workspaces[wsIdx].pendingPrefills[terminalId.uuidString]
+    }
+
+    /// Drop every stored resume command for the given agent. Called when the
+    /// user turns the Resume toggle off, so the change takes effect on next
+    /// launch instead of waiting for the stale entry to be overwritten.
+    func clearResumePrefills(forAgent agent: HookMessage.Agent) {
+        guard agent.supportsResume else { return }
+        var changed = false
+        for i in workspaces.indices {
+            let kept = workspaces[i].pendingPrefills.filter {
+                HookMessage.Agent.fromResumeCommand($0.value) != agent
+            }
+            if kept.count != workspaces[i].pendingPrefills.count {
+                workspaces[i].pendingPrefills = kept
+                changed = true
+            }
+        }
+        if changed { save() }
     }
 
     // MARK: - Helpers

@@ -75,10 +75,23 @@ enum L10n {
 
     enum Tab {
         static let newTabTooltip        = LocalizedStringResource("tab.newTab")
-        // Row rename/close (context menu) and close-tab alert strings are resolved
-        // at runtime via L10n.string("tab.row.rename") etc. — they live only in
-        // AppKit call sites (NSMenuItem, NSAlert), so no typed constant is needed.
-        // See Strings.xcstrings for the full key list.
+        // Row rename/close/resetAutoTitle (context menu) and close-tab alert
+        // strings are resolved at runtime via L10n.string("tab.row.rename")
+        // etc. — they live only in AppKit call sites (NSMenuItem, NSAlert), so
+        // no typed constant is needed. See Strings.xcstrings for the full key list.
+    }
+
+    // MARK: - QuickActions
+
+    /// Display names for builtin Quick Actions. Custom actions render their
+    /// user-entered name verbatim and don't pass through this namespace.
+    enum QuickActions {
+        enum Builtin {
+            static let gitui    = LocalizedStringResource("quickActions.builtin.gitui")
+            static let claude   = LocalizedStringResource("quickActions.builtin.claude")
+            static let codex    = LocalizedStringResource("quickActions.builtin.codex")
+            static let opencode = LocalizedStringResource("quickActions.builtin.opencode")
+        }
     }
 
     // MARK: - Settings
@@ -89,6 +102,7 @@ enum L10n {
         static let sectionFont          = LocalizedStringResource("settings.section.font")
         static let sectionTerminal      = LocalizedStringResource("settings.section.terminal")
         static let sectionShell         = LocalizedStringResource("settings.section.shell")
+        static let sectionQuickActions  = LocalizedStringResource("settings.section.quickActions")
         static let sectionAgents        = LocalizedStringResource("settings.section.agents")
         static let sectionUpdate        = LocalizedStringResource("settings.section.update")
 
@@ -102,6 +116,7 @@ enum L10n {
         static let backgroundOpacity    = LocalizedStringResource("settings.appearance.backgroundOpacity")
         static let backgroundBlur       = LocalizedStringResource("settings.appearance.backgroundBlur")
         static let contentOpacity       = LocalizedStringResource("settings.appearance.contentOpacity")
+        static let contentShadow        = LocalizedStringResource("settings.appearance.contentShadow")
         static let windowPaddingX       = LocalizedStringResource("settings.appearance.windowPaddingX")
         static let windowPaddingY       = LocalizedStringResource("settings.appearance.windowPaddingY")
         static let cursorStyle          = LocalizedStringResource("settings.appearance.cursorStyle")
@@ -143,6 +158,14 @@ enum L10n {
             static let hideMouseWhileTyping   = LocalizedStringResource("settings.terminal.hideMouseWhileTyping")
             static let confirmClose           = LocalizedStringResource("settings.terminal.confirmClose")
         }
+        enum QuickActions {
+            static let customNamePlaceholder    = LocalizedStringResource("settings.quickActions.customNamePlaceholder")
+            static let customCommandPlaceholder = LocalizedStringResource("settings.quickActions.customCommandPlaceholder")
+            static let deleteCustomTooltip      = LocalizedStringResource("settings.quickActions.deleteCustom.tooltip")
+            static let heading                  = LocalizedStringResource("settings.quickActions.heading")
+            static let headingFooter            = LocalizedStringResource("settings.quickActions.headingFooter")
+            static let addCustomButton          = LocalizedStringResource("settings.quickActions.addCustomButton")
+        }
         enum Shell {
             static let integration         = LocalizedStringResource("settings.shell.integration")
             static let features            = LocalizedStringResource("settings.shell.features")
@@ -150,13 +173,17 @@ enum L10n {
             static let defaultPlaceholder  = LocalizedStringResource("settings.shell.defaultPlaceholder")
         }
         enum Agents {
-            static let claude            = LocalizedStringResource("settings.agents.claude")
-            static let codex             = LocalizedStringResource("settings.agents.codex")
-            static let opencode          = LocalizedStringResource("settings.agents.opencode")
-            static let betaBadge         = LocalizedStringResource("settings.agents.betaBadge")
-            static let codexAlertTitle   = LocalizedStringResource("settings.agents.codexAlertTitle")
-            static let codexAlertMessage = LocalizedStringResource("settings.agents.codexAlertMessage")
-            static let codexAlertOK      = LocalizedStringResource("settings.agents.codexAlertOK")
+            static let claude              = LocalizedStringResource("settings.agents.claude")
+            static let codex               = LocalizedStringResource("settings.agents.codex")
+            static let opencode            = LocalizedStringResource("settings.agents.opencode")
+            static let betaBadge           = LocalizedStringResource("settings.agents.betaBadge")
+            static let codexAlertTitle     = LocalizedStringResource("settings.agents.codexAlertTitle")
+            static let codexAlertMessage   = LocalizedStringResource("settings.agents.codexAlertMessage")
+            static let codexAlertOK        = LocalizedStringResource("settings.agents.codexAlertOK")
+            static let notificationsTitle  = LocalizedStringResource("settings.agents.notificationsTitle")
+            static let notificationsFooter = LocalizedStringResource("settings.agents.notificationsFooter")
+            static let resumeTitle         = LocalizedStringResource("settings.agents.resumeTitle")
+            static let resumeFooter        = LocalizedStringResource("settings.agents.resumeFooter")
         }
         enum Update {
             // Labels on the left column of the Form rows.
@@ -216,6 +243,10 @@ enum L10n {
         /// `%lld` will be formatted at call site in mux0App.
         static func selectTabN(_ n: Int) -> LocalizedStringResource {
             LocalizedStringResource("menu.selectTab \(n)")
+        }
+        /// `%lld` will be formatted at call site in mux0App.
+        static func selectWorkspaceN(_ n: Int) -> LocalizedStringResource {
+            LocalizedStringResource("menu.selectWorkspace \(n)")
         }
     }
 }

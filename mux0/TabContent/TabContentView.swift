@@ -22,6 +22,25 @@ import AppKit
 final class TabContentView: NSView {
     var store: WorkspaceStore?
     var pwdStore: TerminalPwdStore?
+    /// Per-terminal agent status store. Used by `buildSplitPane` to wire
+    /// `GhosttyTerminalView.onUserActivity` → `markRead`, so clicking or
+    /// typing in a pane clears its solid status dot (same effect as switching
+    /// tabs, but scoped to just the interacted pane).
+    var statusStore: TerminalStatusStore?
+    /// Used only by `terminalViewFor` to gate consumption of pending agent
+    /// resume commands against the user's Settings → Agents → Resume toggle.
+    var settingsStore: SettingsConfigStore?
+    /// Resolves Quick Action tabs (`tab.quickActionId`) to the shell command to
+    /// auto-execute on the first surface — built-in defaults plus user-defined
+    /// custom actions. Optional so the view stays driveable in tests. Forwarded
+    /// to the tab strip so pill icons render via the same store.
+    var quickActionsStore: QuickActionsStore? {
+        didSet { tabBar.quickActionsStore = quickActionsStore }
+    }
+    /// Agent session titles keyed by terminal UUID. Snapshot is forwarded to
+    /// `TabBarView.update` on every `loadWorkspace` call so the tab strip shows
+    /// agent-generated titles without requiring Observable tracking on the AppKit side.
+    var sessionTitleStore: TerminalSessionTitleStore?
 
     private var theme: AppTheme = .systemFallback(isDark: true)
     /// Mirror of ghostty `background-opacity`. Applied to paneContainer's layer so
@@ -42,6 +61,10 @@ final class TabContentView: NSView {
     /// Last layout snapshot per tab; used with SplitNode.sameStructure to decide whether
     /// the cached pane is still valid.
     private var tabPaneLayouts: [UUID: SplitNode] = [:]
+    /// 上次 activateTab 真正给该 tab 聚焦过的终端 id。用来识别同 tab 内
+    /// `tab.focusedTerminalId` 是否被外部（split/close/⌘⌥→/SplitPaneView.onFocus）
+    /// 改过，以便决定要不要重抓 first responder。详见 activateTab 末尾。
+    private var lastFocusedTerminalByTab: [UUID: UUID] = [:]
     /// The tab whose pane is currently installed as a subview.
     private var visibleTabId: UUID?
     private var keyMonitor: Any?
@@ -88,6 +111,11 @@ final class TabContentView: NSView {
             self.store?.moveTab(fromIndex: fromIndex, toIndex: toIndex, in: wsId)
             self.reloadFromStore()
         }
+        tabBar.onResetAutoTitle = { [weak self] tabId in
+            guard let self, let ws = self.store?.selectedWorkspace else { return }
+            self.store?.resetTabToAutoTitle(tabId: tabId, in: ws.id)
+            self.reloadFromStore()
+        }
 
         subscribeNotifications()
         installKeyMonitor()
@@ -132,6 +160,7 @@ final class TabContentView: NSView {
             tabPanes[id]?.removeFromSuperview()
             tabPanes.removeValue(forKey: id)
             tabPaneLayouts.removeValue(forKey: id)
+            lastFocusedTerminalByTab.removeValue(forKey: id)
         }
 
         // Update tab bar with status dict
@@ -139,6 +168,7 @@ final class TabContentView: NSView {
                       selectedTabId: workspace.selectedTabId,
                       theme: theme,
                       statuses: self.lastStatuses,
+                      sessionTitles: sessionTitleStore?.titlesSnapshot() ?? [:],
                       backgroundOpacity: backgroundOpacity,
                       showStatusIndicators: self.lastShowStatusIndicators)
 
@@ -180,6 +210,8 @@ final class TabContentView: NSView {
 
         // Swap visible pane: detach whichever pane is currently installed, then make
         // sure `pane` is parented to self with the right frame.
+        let didSwitchTab = visibleTabId != tab.id
+        let didFocusedTerminalChange = lastFocusedTerminalByTab[tab.id] != tab.focusedTerminalId
         if let currentId = visibleTabId, currentId != tab.id {
             tabPanes[currentId]?.removeFromSuperview()
         }
@@ -194,8 +226,25 @@ final class TabContentView: NSView {
         }
         pane.applyTheme(theme)
 
-        // Restore focus
-        focusTerminal(tab.focusedTerminalId)
+        // 三类需要主动把 first responder 拽到终端的"用户行为驱动"路径：
+        //   1. 真切 tab（含首次安装：visibleTabId 旧值 nil → tab.id）
+        //   2. layout 结构变了（split / close 让 SplitPaneView 整棵被替换，
+        //      旧 GhosttyTerminalView 已 removeFromSuperview，window.firstResponder
+        //      若指向它会失效）
+        //   3. focusedTerminalId 变了（split 落到新 pane / close 退到兄弟 pane /
+        //      ⌘⌥→ 切窗格 / SplitPaneView.onFocus 程序焦点切换）—— 这种情况下
+        //      要么用户已经手动让目标 view 当 firstResponder（再调 makeFirstResponder
+        //      是 idempotent），要么 store 单方面切了 focus 我们必须跟上
+        //
+        // 其余场景（status / pwd / metadata / workspace 列表 / 设置面板状态等任一
+        // @Observable 变化触发的 SwiftUI 重渲）不会让上述三个值变化——保持当前
+        // first responder 不动，避免把侧栏 / 标签的内联 rename 字段（NSText 子类）
+        // 强行 resign，触发 controlTextDidEndEditing 把用户没编辑完的内容当成
+        // 确认提交并关掉 rename UI。
+        if didSwitchTab || !structureMatches || didFocusedTerminalChange {
+            focusTerminal(tab.focusedTerminalId)
+        }
+        lastFocusedTerminalByTab[tab.id] = tab.focusedTerminalId
     }
 
     private func buildSplitPane(for tab: TerminalTab) -> SplitPaneView {
@@ -214,6 +263,9 @@ final class TabContentView: NSView {
                 tv.onFocus = { [weak self] in
                     guard let self, let wsId = self.store?.selectedId else { return }
                     self.store?.updateFocusedTerminal(id: id, tabId: tabId, in: wsId)
+                }
+                tv.onUserActivity = { [weak self] in
+                    self?.statusStore?.markRead(terminalIds: [id])
                 }
                 return tv
             },
@@ -234,9 +286,30 @@ final class TabContentView: NSView {
         let tv = GhosttyTerminalView(frame: .zero)
         tv.terminalId = id
         tv.pwdStoreRef = pwdStore
-        tv.command = store?.selectedWorkspace?.defaultCommand
+        tv.command = resolvedStartupCommand(forTerminal: id)
         terminalViews[id] = tv
         return tv
+    }
+
+    /// Thin wrapper that gathers state from the active workspace and forwards
+    /// to `StartupCommandResolver.resolve` — see that type's doc comment for
+    /// the full source-order rules (Quick Action / agent resume / default).
+    private func resolvedStartupCommand(forTerminal id: UUID) -> String? {
+        let workspace = store?.selectedWorkspace
+        let tab = workspace?.tabs.first { $0.layout.allTerminalIds().contains(id) }
+        let pendingPrefill = store?.consumePendingPrefill(terminalId: id)
+        return StartupCommandResolver.resolve(
+            terminalId: id,
+            tab: tab,
+            workspaceDefaultCommand: workspace?.defaultCommand,
+            quickActionCommand: { [quickActionsStore] actionId in
+                quickActionsStore?.command(for: actionId)
+            },
+            isResumeEnabled: { [settingsStore] agent in
+                settingsStore?.get(agent.resumeSettingsKey) == "true"
+            },
+            pendingPrefill: pendingPrefill
+        )
     }
 
     private func focusTerminal(_ id: UUID) {
@@ -290,13 +363,16 @@ final class TabContentView: NSView {
     // MARK: - Notification subscriptions
 
     private func subscribeNotifications() {
+        // 注：Edit > Copy / Paste / Select All 不在这里订阅。⌘C/⌘V/⌘A 由 mux0App 的
+        // pasteboard CommandGroup 通过 NSApp.sendAction(_:to:nil) 沿 responder chain
+        // 派发，由 NSText 子类（rename 字段 / 设置 TextField）或 GhosttyTerminalView
+        // 的同名 selector 直接处理。
         let names: [Notification.Name] = [
             .mux0NewTab, .mux0ClosePane,
             .mux0SplitVertical, .mux0SplitHorizontal,
             .mux0SelectNextTab, .mux0SelectPrevTab,
             .mux0SelectTabAtIndex,
             .mux0FocusNextPane, .mux0FocusPrevPane,
-            .mux0Copy, .mux0Paste, .mux0SelectAll,
         ]
         for name in names {
             NotificationCenter.default.addObserver(
@@ -318,9 +394,6 @@ final class TabContentView: NSView {
             if let idx = note.userInfo?["index"] as? Int { selectTab(at: idx) }
         case .mux0FocusNextPane:    focusAdjacentPane(forward: true)
         case .mux0FocusPrevPane:    focusAdjacentPane(forward: false)
-        case .mux0Copy:             focusedTerminalView()?.copySelection()
-        case .mux0Paste:            focusedTerminalView()?.pasteClipboard()
-        case .mux0SelectAll:        focusedTerminalView()?.selectAll()
         default: break
         }
     }
@@ -406,22 +479,41 @@ final class TabContentView: NSView {
         return terminalViews[tab.focusedTerminalId]
     }
 
-    // MARK: - Key monitor for ⌘⌥arrow pane navigation
+    // MARK: - Key monitor (hidden shortcut aliases)
 
     private func installKeyMonitor() {
-        // ⌘⌥→ and ⌘⌥← are now menu items (Terminal → Focus Next/Previous Pane),
-        // so SwiftUI dispatches those via .mux0FocusNextPane / .mux0FocusPrevPane.
-        // The monitor remains only for the ↑/↓ aliases — intentional hidden duplicates
-        // not shown in the menu, kept because they're a common pane-nav habit.
+        // 处理两组 menu 不可见的 hidden duplicate 快捷键：
+        // - ⌘⌥↑/↓ 是 Terminal → Focus Next/Previous Pane 的别名（菜单展示
+        //   ⌘⌥→/← 给水平 pane 直觉；↑/↓ 是常见 pane-nav 习惯）
+        // - Ctrl+Tab / Ctrl+Shift+Tab 是 Terminal → Select Next/Previous Tab
+        //   (⌘⇧]/[) 的浏览器/iTerm 风格别名
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self,
-                  event.modifierFlags.intersection([.command, .option]) == [.command, .option]
-            else { return event }
-            switch event.keyCode {
-            case 125: self.focusAdjacentPane(forward: true);  return nil  // ↓
-            case 126: self.focusAdjacentPane(forward: false); return nil  // ↑
-            default: return event
+            guard let self else { return event }
+
+            // 只看 ⌘⌃⌥⇧ 这四位，忽略 .numericPad / .function / .capsLock 等
+            let interesting: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
+            let mods = event.modifierFlags.intersection(interesting)
+
+            // ⌘⌥↑/↓ — pane 切焦点
+            if mods == [.command, .option] {
+                switch event.keyCode {
+                case 125: self.focusAdjacentPane(forward: true);  return nil  // ↓
+                case 126: self.focusAdjacentPane(forward: false); return nil  // ↑
+                default: break
+                }
             }
+
+            // Ctrl+Tab / Ctrl+Shift+Tab — tab 循环（keyCode 48 = Tab）
+            if event.keyCode == 48 {
+                if mods == [.control] {
+                    self.cycleTab(forward: true);  return nil
+                }
+                if mods == [.control, .shift] {
+                    self.cycleTab(forward: false); return nil
+                }
+            }
+
+            return event
         }
     }
 
